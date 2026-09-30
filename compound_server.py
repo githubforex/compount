@@ -15,6 +15,8 @@ from urllib.parse import urlparse, parse_qs
 import datetime
 import threading
 import pymysql
+import hashlib
+import secrets
 
 HOST = "0.0.0.0"
 PORT = 7777
@@ -102,6 +104,16 @@ def _conn():
                            autocommit=True)
 
 
+def _table_exists(cur, table):
+    cur.execute("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (table,))
+    return cur.fetchone()[0] > 0
+
+
+def _col_exists(cur, table, col):
+    cur.execute("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s", (table, col))
+    return cur.fetchone()[0] > 0
+
+
 def init_db():
     c = pymysql.connect(host=DB_CONFIG["host"], port=DB_CONFIG["port"],
                         user=DB_CONFIG["user"], password=DB_CONFIG["password"],
@@ -112,70 +124,157 @@ def init_db():
     conn = _conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS users (
+                username VARCHAR(64) PRIMARY KEY,
+                salt VARCHAR(32),
+                password_hash VARCHAR(128),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+            if _table_exists(cur, "plans") and not _col_exists(cur, "plans", "username"):
+                cur.execute("DROP TABLE plans")
             cur.execute("""CREATE TABLE IF NOT EXISTS plans (
-                name VARCHAR(255) PRIMARY KEY,
+                username VARCHAR(64),
+                name VARCHAR(255),
                 principal VARCHAR(32),
                 rate VARCHAR(32),
                 periods VARCHAR(32),
-                start_date VARCHAR(32)
+                start_date VARCHAR(32),
+                PRIMARY KEY (username, name)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+            if _table_exists(cur, "reflections") and not _col_exists(cur, "reflections", "username"):
+                cur.execute("DROP TABLE reflections")
             cur.execute("""CREATE TABLE IF NOT EXISTS reflections (
+                username VARCHAR(64),
                 plan_name VARCHAR(255),
                 ref_date VARCHAR(32),
                 content LONGTEXT,
-                PRIMARY KEY (plan_name, ref_date)
+                PRIMARY KEY (username, plan_name, ref_date)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
     finally:
         conn.close()
 
 
-def load_plans():
-    conn = _conn()
+def hash_password(password, salt=None):
+    if salt is None:
+        salt = secrets.token_hex(16)
+    h = hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+    return salt, h
+
+
+_SESSIONS = {}
+_SESSIONS_LOCK = threading.Lock()
+
+
+def create_session(username):
+    token = secrets.token_hex(32)
+    with _SESSIONS_LOCK:
+        _SESSIONS[token] = username
+    return token
+
+
+def get_session_user(token):
+    with _SESSIONS_LOCK:
+        return _SESSIONS.get(token)
+
+
+def delete_session(token):
+    with _SESSIONS_LOCK:
+        _SESSIONS.pop(token, None)
+
+
+def register_user(username, password):
+    salt, h = hash_password(password)
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT name, principal, rate, periods, start_date FROM plans")
-            rows = cur.fetchall()
-        return {name: {"principal": principal, "rate": rate, "periods": periods, "start_date": start_date}
-                for name, principal, rate, periods, start_date in rows}
-    finally:
-        conn.close()
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO users (username, salt, password_hash) VALUES (%s, %s, %s)", (username, salt, h))
+            return True, ""
+        except pymysql.err.IntegrityError:
+            return False, "用户名已存在"
+        finally:
+            conn.close()
+    except Exception:
+        return False, "服务器错误"
 
 
-def save_plan(name, params):
-    conn = _conn()
+def verify_user(username, password):
     try:
-        with conn.cursor() as cur:
-            cur.execute("""INSERT INTO plans (name, principal, rate, periods, start_date)
-                           VALUES (%s, %s, %s, %s, %s)
-                           ON DUPLICATE KEY UPDATE principal=VALUES(principal), rate=VALUES(rate),
-                           periods=VALUES(periods), start_date=VALUES(start_date)""",
-                        (name, params.get("principal", ""), params.get("rate", ""),
-                         params.get("periods", ""), params.get("start_date", "")))
-    finally:
-        conn.close()
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT salt, password_hash FROM users WHERE username=%s", (username,))
+                row = cur.fetchone()
+            if not row:
+                return False
+            salt, h = row
+            _, h2 = hash_password(password, salt)
+            return h2 == h
+        finally:
+            conn.close()
+    except Exception:
+        return False
 
 
-def load_reflections():
-    conn = _conn()
+def load_plans(username):
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT plan_name, ref_date, content FROM reflections")
-            rows = cur.fetchall()
-        return {plan_name + "|" + ref_date: content for plan_name, ref_date, content in rows}
-    finally:
-        conn.close()
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name, principal, rate, periods, start_date FROM plans WHERE username=%s", (username,))
+                rows = cur.fetchall()
+            return {name: {"principal": principal, "rate": rate, "periods": periods, "start_date": start_date}
+                    for name, principal, rate, periods, start_date in rows}
+        finally:
+            conn.close()
+    except Exception:
+        return {}
 
 
-def save_reflection(plan_name, ref_date, content):
-    conn = _conn()
+def save_plan(username, name, params):
     try:
-        with conn.cursor() as cur:
-            cur.execute("""INSERT INTO reflections (plan_name, ref_date, content)
-                           VALUES (%s, %s, %s)
-                           ON DUPLICATE KEY UPDATE content=VALUES(content)""",
-                        (plan_name, ref_date, content))
-    finally:
-        conn.close()
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO plans (username, name, principal, rate, periods, start_date)
+                               VALUES (%s, %s, %s, %s, %s, %s)
+                               ON DUPLICATE KEY UPDATE principal=VALUES(principal), rate=VALUES(rate),
+                               periods=VALUES(periods), start_date=VALUES(start_date)""",
+                            (username, name, params.get("principal", ""), params.get("rate", ""),
+                             params.get("periods", ""), params.get("start_date", "")))
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def load_reflections(username):
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT plan_name, ref_date, content FROM reflections WHERE username=%s", (username,))
+                rows = cur.fetchall()
+            return {plan_name + "|" + ref_date: content for plan_name, ref_date, content in rows}
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+
+def save_reflection(username, plan_name, ref_date, content):
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO reflections (username, plan_name, ref_date, content)
+                               VALUES (%s, %s, %s, %s)
+                               ON DUPLICATE KEY UPDATE content=VALUES(content)""",
+                            (username, plan_name, ref_date, content))
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 def compute(principal, rate, periods):
@@ -267,6 +366,17 @@ HTML = r"""<!DOCTYPE html>
     background-attachment:fixed;
     transition:color .2s ease;
   }
+  .login-overlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:var(--bg); z-index:300; }
+  .login-card { width:340px; background:var(--card); border:1px solid var(--line); border-radius:16px; padding:32px 28px; box-shadow:var(--shadow-lg); }
+  .login-title { font-size:24px; font-weight:800; text-align:center; margin-bottom:20px; background:var(--grad); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+  .login-tabs { display:flex; gap:8px; margin-bottom:16px; }
+  .login-tabs .tab { flex:1; padding:8px 0; border:1px solid var(--line); background:transparent; border-radius:8px; cursor:pointer; font-size:14px; color:var(--muted); }
+  .login-tabs .tab.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .login-card input { width:100%; margin-bottom:12px; }
+  .login-error { color:var(--red); font-size:12px; min-height:18px; margin-bottom:8px; text-align:center; }
+  .login-btn { width:100%; }
+  .user-info { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); }
+  .logout-btn { border:1px solid var(--line); background:transparent; border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; color:var(--muted); }
   .wrap { max-width:1080px; margin:0 auto; }
   .head { display:flex; align-items:baseline; gap:10px; }
   h1 {
@@ -433,11 +543,25 @@ HTML = r"""<!DOCTYPE html>
 <script src="/echarts-gl.min.js"></script>
 </head>
 <body>
+<div class="login-overlay" id="login_overlay">
+  <div class="login-card">
+    <div class="login-title">交易计划</div>
+    <div class="login-tabs">
+      <button id="tab_login" class="tab active" onclick="switchAuthMode('login')">登录</button>
+      <button id="tab_register" class="tab" onclick="switchAuthMode('register')">注册</button>
+    </div>
+    <input id="login_username" type="text" placeholder="用户名" autocomplete="off">
+    <input id="login_password" type="password" placeholder="密码">
+    <div class="login-error" id="login_error"></div>
+    <button class="login-btn" id="login_btn" onclick="doAuth()">登 录</button>
+  </div>
+</div>
 <button class="theme-toggle" id="themeToggle" title="切换深浅主题" onclick="toggleTheme()">🌙</button>
-<div class="wrap">
+<div class="wrap" id="main_wrap" style="display:none">
   <div class="head">
     <h1>交易计划</h1>
     <span class="badge">服务端版</span>
+    <span class="user-info">👤 <span id="user_name"></span> <button class="logout-btn" onclick="logout()">退出</button></span>
   </div>
   <div class="subtitle">输入基数、复利次数和每期利率，服务端实时计算并返回明细</div>
 
@@ -922,11 +1046,61 @@ document.addEventListener('mouseout', function (e) {
   if (el && !el.contains(e.relatedTarget)) el.style.transform = '';
 });
 
+let authToken = sessionStorage.getItem('token') || null;
+let authUser = sessionStorage.getItem('username') || null;
+let authMode = 'login';
+
+function switchAuthMode(mode) {
+  authMode = mode;
+  document.getElementById('tab_login').className = 'tab' + (mode === 'login' ? ' active' : '');
+  document.getElementById('tab_register').className = 'tab' + (mode === 'register' ? ' active' : '');
+  document.getElementById('login_btn').textContent = mode === 'login' ? '登 录' : '注 册';
+  document.getElementById('login_error').textContent = '';
+}
+
+function doAuth() {
+  const username = document.getElementById('login_username').value.trim();
+  const password = document.getElementById('login_password').value;
+  if (!username || !password) {
+    document.getElementById('login_error').textContent = '请输入用户名和密码';
+    return;
+  }
+  fetch(authMode === 'login' ? '/api/login' : '/api/register', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username: username, password: password})
+  }).then(function(r){ return r.json(); }).then(function(d) {
+    if (d.error) { document.getElementById('login_error').textContent = d.error; return; }
+    authToken = d.token;
+    authUser = d.username;
+    sessionStorage.setItem('token', authToken);
+    sessionStorage.setItem('username', authUser);
+    enterApp();
+  });
+}
+
+function enterApp() {
+  document.getElementById('login_overlay').style.display = 'none';
+  document.getElementById('main_wrap').style.display = 'block';
+  document.getElementById('user_name').textContent = authUser;
+  loadPlans();
+  loadReflections();
+}
+
+function logout() {
+  if (authToken) {
+    fetch('/api/logout', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token: authToken})});
+  }
+  sessionStorage.removeItem('token');
+  sessionStorage.removeItem('username');
+  location.reload();
+}
+
 let reflections = {};
 let currentReflectionDate = null;
 
 function loadReflections() {
-  fetch('/api/reflections')
+  fetch('/api/reflections?token=' + encodeURIComponent(authToken))
     .then(function(r){ return r.json(); })
     .then(function(d){ reflections = d || {}; updateReflectionButtons(); });
 }
@@ -951,7 +1125,7 @@ function saveReflection() {
   fetch('/api/reflection', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({plan: currentPlan || '', date: currentReflectionDate, content: content})
+    body: JSON.stringify({token: authToken, plan: currentPlan || '', date: currentReflectionDate, content: content})
   }).then(function(r){ return r.json(); }).then(function() {
     reflections[(currentPlan || '') + '|' + currentReflectionDate] = content;
     closeReflection();
@@ -1076,7 +1250,7 @@ function escapeHtml(v) {
 }
 
 function loadPlans() {
-  fetch('/api/plans')
+  fetch('/api/plans?token=' + encodeURIComponent(authToken))
     .then(function(r){ return r.json(); })
     .then(function(d){ plans = d || {}; renderPlansTabs(); });
 }
@@ -1128,7 +1302,7 @@ function savePlan() {
   fetch('/api/plan', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name: name, params: params})
+    body: JSON.stringify({token: authToken, name: name, params: params})
   });
 }
 
@@ -1140,8 +1314,9 @@ document.addEventListener('click', function(e) {
   else if (tab.dataset.name) { switchPlan(tab.dataset.name); }
 });
 
-loadReflections();
-loadPlans();
+if (authToken) {
+  enterApp();
+}
 
 </script>
 <div class="modal-overlay" id="refl_overlay" style="display:none">
@@ -1207,10 +1382,22 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_trading(parse_qs(parsed.query))
             return
         if parsed.path == "/api/reflections":
-            self._send(200, json.dumps(load_reflections(), ensure_ascii=False), "application/json; charset=utf-8")
+            q = parse_qs(parsed.query)
+            token = q.get("token", [None])[0]
+            user = get_session_user(token) if token else None
+            if not user:
+                self._send(401, json.dumps({"error": "未登录"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps(load_reflections(user), ensure_ascii=False), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/plans":
-            self._send(200, json.dumps(load_plans(), ensure_ascii=False), "application/json; charset=utf-8")
+            q = parse_qs(parsed.query)
+            token = q.get("token", [None])[0]
+            user = get_session_user(token) if token else None
+            if not user:
+                self._send(401, json.dumps({"error": "未登录"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps(load_plans(user), ensure_ascii=False), "application/json; charset=utf-8")
             return
         if parsed.path == "/favicon.ico":
             self._send(204, "", "text/plain")
@@ -1225,39 +1412,71 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/api/reflection":
+        if parsed.path in ("/api/register", "/api/login", "/api/logout", "/api/reflection", "/api/plan"):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length).decode("utf-8")
-                data = json.loads(body)
+                data = json.loads(body) if body else {}
             except (ValueError, json.JSONDecodeError):
                 self._send(400, json.dumps({"error": "invalid json"}), "application/json; charset=utf-8")
                 return
-            plan = data.get("plan") or ""
-            date = data.get("date")
-            content = data.get("content", "")
-            if not date:
-                self._send(400, json.dumps({"error": "date required"}), "application/json; charset=utf-8")
+
+            if parsed.path == "/api/register":
+                username = (data.get("username") or "").strip()
+                password = data.get("password") or ""
+                if not username or not password:
+                    self._send(400, json.dumps({"error": "用户名和密码不能为空"}), "application/json; charset=utf-8")
+                    return
+                ok, msg = register_user(username, password)
+                if not ok:
+                    self._send(400, json.dumps({"error": msg}), "application/json; charset=utf-8")
+                    return
+                token = create_session(username)
+                self._send(200, json.dumps({"ok": True, "token": token, "username": username}), "application/json; charset=utf-8")
                 return
-            save_reflection(plan, date, content)
-            self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
-            return
-        if parsed.path == "/api/plan":
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(length).decode("utf-8")
-                data = json.loads(body)
-            except (ValueError, json.JSONDecodeError):
-                self._send(400, json.dumps({"error": "invalid json"}), "application/json; charset=utf-8")
+
+            if parsed.path == "/api/login":
+                username = (data.get("username") or "").strip()
+                password = data.get("password") or ""
+                if not verify_user(username, password):
+                    self._send(401, json.dumps({"error": "用户名或密码错误"}), "application/json; charset=utf-8")
+                    return
+                token = create_session(username)
+                self._send(200, json.dumps({"ok": True, "token": token, "username": username}), "application/json; charset=utf-8")
                 return
-            name = (data.get("name") or "").strip()
-            params = data.get("params") or {}
-            if not name:
-                self._send(400, json.dumps({"error": "name required"}), "application/json; charset=utf-8")
+
+            if parsed.path == "/api/logout":
+                delete_session(data.get("token"))
+                self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
                 return
-            save_plan(name, params)
-            self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
-            return
+
+            token = data.get("token")
+            user = get_session_user(token) if token else None
+            if not user:
+                self._send(401, json.dumps({"error": "未登录"}), "application/json; charset=utf-8")
+                return
+
+            if parsed.path == "/api/reflection":
+                plan = data.get("plan") or ""
+                date = data.get("date")
+                content = data.get("content", "")
+                if not date:
+                    self._send(400, json.dumps({"error": "date required"}), "application/json; charset=utf-8")
+                    return
+                save_reflection(user, plan, date, content)
+                self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
+                return
+
+            if parsed.path == "/api/plan":
+                name = (data.get("name") or "").strip()
+                params = data.get("params") or {}
+                if not name:
+                    self._send(400, json.dumps({"error": "name required"}), "application/json; charset=utf-8")
+                    return
+                save_plan(user, name, params)
+                self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
+                return
+
         self._send(404, json.dumps({"error": "not found"}), "application/json; charset=utf-8")
 
     def _handle_api(self, q):
