@@ -86,11 +86,11 @@ def project_end(start_date, periods, holidays):
 
 # ---- MySQL 持久化 ----
 DB_CONFIG = {
-    "host": "127.0.0.1",
-    "port": 3306,
-    "user": "root",
-    "password": "123456",
-    "database": "compound",
+    "host": os.environ.get("MYSQL_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("MYSQL_PORT", "3306")),
+    "user": os.environ.get("MYSQL_USER", "root"),
+    "password": os.environ.get("MYSQL_PASSWORD", "123456"),
+    "database": os.environ.get("MYSQL_DB", "compound"),
     "charset": "utf8mb4",
 }
 
@@ -203,31 +203,31 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>复利计算器 - 服务端</title>
+<title>交易计划 - 服务端</title>
 <script>(function(){try{var t=localStorage.getItem('theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
 <style>
   /* 设计语言参考 Beautiful UI (beautifului.dev) — oklch 近似双主题 */
   :root {
     --accent:#4c6ef5;
     --accent-strong:#3b5bdb;
-    --accent-tint:rgba(76,110,245,.12);
+    --accent-tint:rgba(76,110,245,.14);
     --violet:#7c3aed;
     --green:#2f9e44;
     --orange:#f76707;
     --red:#e03131;
-    --ink:#1b1b1f;
-    --muted:#6b7280;
-    --line:#e6e6ea;
+    --ink:#e8e8ec;
+    --muted:#9aa0aa;
+    --line:#3a3a42;
     --bg:#f4f4f7;
-    --card:#ffffff;
-    --th-bg:#f7f7fa;
-    --hover-bg:#f2f6ff;
+    --card:#26262c;
+    --th-bg:#2f2f36;
+    --hover-bg:rgba(77,124,254,.10);
     --glow1:rgba(76,110,245,.16);
     --glow2:rgba(124,58,237,.10);
-    --shadow-sm:0 1px 2px rgba(15,23,42,.05);
-    --shadow:0 1px 2px rgba(15,23,42,.04), 0 10px 30px rgba(15,23,42,.06);
-    --shadow-lg:0 16px 48px rgba(15,23,42,.12);
-    --shadow-3d:inset 0 1px 0 rgba(255,255,255,.95), inset 0 -1px 0 rgba(15,23,42,.04), 0 1px 2px rgba(15,23,42,.05), 0 4px 10px rgba(15,23,42,.07), 0 14px 30px rgba(15,23,42,.09), 0 32px 64px -16px rgba(15,23,42,.16);
+    --shadow-sm:0 1px 2px rgba(0,0,0,.2);
+    --shadow:0 1px 2px rgba(0,0,0,.15), 0 10px 30px rgba(0,0,0,.15);
+    --shadow-lg:0 16px 48px rgba(0,0,0,.25);
+    --shadow-3d:inset 0 1px 0 rgba(255,255,255,.06), inset 0 -1px 0 rgba(0,0,0,.3), 0 1px 2px rgba(0,0,0,.3), 0 4px 10px rgba(0,0,0,.3), 0 14px 30px rgba(0,0,0,.3), 0 32px 64px -16px rgba(0,0,0,.5);
     --btn-3d:#2a3fc4;
     --radius:16px;
     --grad:linear-gradient(120deg,#4c6ef5 0%,#7c3aed 100%);
@@ -240,20 +240,20 @@ HTML = r"""<!DOCTYPE html>
     --green:#3fb950;
     --orange:#ff922b;
     --red:#ff6b6b;
-    --ink:#e8e8ec;
-    --muted:#9aa0aa;
-    --line:#2a2a30;
+    --ink:#1b1b1f;
+    --muted:#6b7280;
+    --line:#e6e6ea;
     --bg:#131316;
-    --card:#1d1d22;
-    --th-bg:#242429;
-    --hover-bg:rgba(77,124,254,.08);
+    --card:#ffffff;
+    --th-bg:#f7f7fa;
+    --hover-bg:#f2f6ff;
     --glow1:rgba(77,124,254,.22);
     --glow2:rgba(167,139,250,.14);
-    --shadow-sm:0 1px 2px rgba(0,0,0,.4);
-    --shadow:0 1px 3px rgba(0,0,0,.35), 0 10px 30px rgba(0,0,0,.35);
-    --shadow-lg:0 20px 56px rgba(0,0,0,.55);
-    --shadow-3d:inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.35), 0 1px 2px rgba(0,0,0,.5), 0 4px 10px rgba(0,0,0,.5), 0 14px 30px rgba(0,0,0,.55), 0 32px 64px -16px rgba(0,0,0,.7);
-    --btn-3d:#1e37b0;
+    --shadow-sm:0 1px 2px rgba(15,23,42,.05);
+    --shadow:0 1px 2px rgba(15,23,42,.04), 0 10px 30px rgba(15,23,42,.06);
+    --shadow-lg:0 16px 48px rgba(15,23,42,.12);
+    --shadow-3d:inset 0 1px 0 rgba(255,255,255,.95), inset 0 -1px 0 rgba(15,23,42,.04), 0 1px 2px rgba(15,23,42,.05), 0 4px 10px rgba(15,23,42,.07), 0 14px 30px rgba(15,23,42,.09), 0 32px 64px -16px rgba(15,23,42,.16);
+    --btn-3d:#2a3fc4;
     --grad:linear-gradient(120deg,#4d7cfe 0%,#a78bfa 100%);
   }
   * { box-sizing:border-box; }
@@ -299,8 +299,6 @@ HTML = r"""<!DOCTYPE html>
   }
   input:hover { border-color:var(--muted); }
   input:focus { border-color:var(--accent); box-shadow:inset 0 2px 4px rgba(15,23,42,.05), 0 0 0 4px var(--accent-tint); }
-  [data-theme="dark"] input { box-shadow:inset 0 2px 4px rgba(0,0,0,.45), inset 0 -1px 0 rgba(255,255,255,.04); }
-  [data-theme="dark"] input:focus { box-shadow:inset 0 2px 4px rgba(0,0,0,.45), 0 0 0 4px var(--accent-tint); }
   button {
     padding:12px 26px; font-size:15px; font-weight:700; color:#fff;
     background:var(--grad); border:none; border-radius:12px; cursor:pointer;
@@ -438,7 +436,7 @@ HTML = r"""<!DOCTYPE html>
 <button class="theme-toggle" id="themeToggle" title="切换深浅主题" onclick="toggleTheme()">🌙</button>
 <div class="wrap">
   <div class="head">
-    <h1>复利计算器</h1>
+    <h1>交易计划</h1>
     <span class="badge">服务端版</span>
   </div>
   <div class="subtitle">输入基数、复利次数和每期利率，服务端实时计算并返回明细</div>
@@ -531,22 +529,23 @@ let lastRows = null, lastPrincipal = null, lastTradeDates = null, adjustedDiffs 
 
 function themeColors() {
   const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  // 主题语义：黑夜=白卡片(用浅色图表配色)，白天=深卡片(用深色图表配色)
   return dark ? {
     accent:'#4d7cfe', orange:'#ff922b', green:'#3fb950', red:'#ff6b6b',
-    accentTop:'rgba(77,124,254,0.42)', accentBottom:'rgba(77,124,254,0.02)',
+    accentTop:'rgba(77,124,254,0.32)', accentBottom:'rgba(77,124,254,0.01)',
     orangeTop:'rgba(255,146,43,0.95)', orangeBottom:'rgba(255,146,43,0.28)',
-    greenTop:'rgba(63,185,80,0.42)', greenBottom:'rgba(63,185,80,0.02)',
-    axisLabel:'#9aa0aa', axisLine:'#2a2a30', splitLine:'rgba(255,255,255,0.06)',
-    tooltipBg:'rgba(32,32,37,0.96)', ink:'#e8e8ec',
-    gridBg:'#1d1d22',
-  } : {
-    accent:'#4c6ef5', orange:'#f76707', green:'#2f9e44', red:'#e03131',
-    accentTop:'rgba(76,110,245,0.32)', accentBottom:'rgba(76,110,245,0.01)',
-    orangeTop:'rgba(247,103,7,0.95)', orangeBottom:'rgba(247,103,7,0.28)',
-    greenTop:'rgba(47,158,68,0.30)', greenBottom:'rgba(47,158,68,0.01)',
+    greenTop:'rgba(63,185,80,0.30)', greenBottom:'rgba(63,185,80,0.01)',
     axisLabel:'#6b7280', axisLine:'#e6e6ea', splitLine:'rgba(0,0,0,0.06)',
     tooltipBg:'rgba(255,255,255,0.96)', ink:'#1b1b1f',
     gridBg:'#ffffff',
+  } : {
+    accent:'#4c6ef5', orange:'#f76707', green:'#2f9e44', red:'#e03131',
+    accentTop:'rgba(76,110,245,0.42)', accentBottom:'rgba(76,110,245,0.02)',
+    orangeTop:'rgba(247,103,7,0.95)', orangeBottom:'rgba(247,103,7,0.28)',
+    greenTop:'rgba(47,158,68,0.42)', greenBottom:'rgba(47,158,68,0.02)',
+    axisLabel:'#9aa0aa', axisLine:'#2a2a30', splitLine:'rgba(255,255,255,0.06)',
+    tooltipBg:'rgba(32,32,37,0.96)', ink:'#e8e8ec',
+    gridBg:'#26262c',
   };
 }
 
