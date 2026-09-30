@@ -454,7 +454,7 @@ HTML = r"""<!DOCTYPE html>
       </div>
       <div>
         <label for="periods">复利次数</label>
-        <input id="periods" type="number" min="1" max="500" step="1" value="220">
+        <input id="periods" type="number" min="1" step="1" value="220">
       </div>
       <div>
         <label for="rate">每期利率（%）</label>
@@ -1276,8 +1276,8 @@ class Handler(BaseHTTPRequestHandler):
         if principal <= 0 or principal > MAX_PRINCIPAL:
             self._send(400, json.dumps({"error": f"基数需在 0 ~ {MAX_PRINCIPAL:g} 之间"}), "application/json; charset=utf-8")
             return
-        if periods < 1 or periods > MAX_PERIODS:
-            self._send(400, json.dumps({"error": f"复利次数需在 1 ~ {MAX_PERIODS} 之间"}), "application/json; charset=utf-8")
+        if periods < 1:
+            self._send(400, json.dumps({"error": "复利次数需至少为 1"}), "application/json; charset=utf-8")
             return
         if rate <= -1 or rate > 10:
             self._send(400, json.dumps({"error": "利率需在 -100% ~ 1000% 之间"}), "application/json; charset=utf-8")
@@ -1306,8 +1306,8 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             self._send(400, json.dumps({"error": "参数格式错误：start=YYYY-MM-DD, periods=整数"}), "application/json; charset=utf-8")
             return
-        if periods < 1 or periods > MAX_PERIODS:
-            self._send(400, json.dumps({"error": f"复利次数需在 1 ~ {MAX_PERIODS} 之间"}), "application/json; charset=utf-8")
+        if periods < 1:
+            self._send(400, json.dumps({"error": "复利次数需至少为 1"}), "application/json; charset=utf-8")
             return
 
         # 逐日推演，收集区间内每天的交易状态
