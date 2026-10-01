@@ -442,6 +442,11 @@ HTML = r"""<!DOCTYPE html>
   .cal-end { box-shadow:inset 0 0 0 2px var(--accent); }
   .cal-badge { position:absolute; top:1px; right:4px; font-size:9px; color:var(--red); }
   .cal-profit { display:block; font-size:10px; color:var(--red); margin-top:2px; line-height:1.1; white-space:nowrap; }
+  .cal-summary { display:flex; flex-direction:column; justify-content:center; align-items:center; background:rgba(76,110,245,.10); border:1px dashed var(--accent); border-radius:8px; padding:4px 2px; }
+  .cal-summary .cal-sum-pnl { font-size:10px; font-weight:700; line-height:1.1; white-space:nowrap; }
+  .cal-summary .cal-sum-rate { font-size:9px; color:var(--muted); line-height:1.1; white-space:nowrap; margin-top:1px; }
+  .cal-summary.pos .cal-sum-pnl { color:var(--red); }
+  .cal-summary.neg .cal-sum-pnl { color:var(--green); }
   .cal-month { grid-column:1 / -1; text-align:left; font-size:12px; font-weight:700; color:var(--muted); padding:8px 2px 2px; border-top:1px solid var(--line); margin-top:6px; }
   .refl-btn { border:none; background:transparent; cursor:pointer; font-size:15px; padding:2px 6px; }
   .refl-btn.has { color:var(--green); }
@@ -474,6 +479,7 @@ HTML = r"""<!DOCTYPE html>
   .lg-t::before { background:var(--accent-tint); }
   .lg-w::before { background:var(--th-bg); }
   .lg-h::before { background:rgba(224,49,49,.35); }
+  .lg-sum::before { background:rgba(76,110,245,.12); border:1px dashed var(--accent); box-sizing:border-box; }
   .field { position:relative; }
   .datepicker { position:absolute; left:0; top:calc(100% + 6px); width:292px; background:var(--card); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow-lg); padding:12px; z-index:50; }
   .dp-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
@@ -815,6 +821,15 @@ function project() {
     });
 }
 
+function monthSummaryHtml(ym, pnl, prevAmount) {
+  const pct = prevAmount ? (pnl / prevAmount * 100) : 0;
+  const cls = pnl >= 0 ? 'pos' : 'neg';
+  return '<div class="cal-cell cal-summary ' + cls + '" title="' + ym + '月：盈亏 ' + (pnl >= 0 ? '+' : '') + fmt(pnl) + ' 元，收益率 ' + (pct >= 0 ? '+' : '') + fmtInt(pct) + '%">' +
+    '<span class="cal-sum-pnl">' + (pnl >= 0 ? '+' : '') + fmtCompact(pnl) + '</span>' +
+    '<span class="cal-sum-rate">' + (pct >= 0 ? '+' : '') + fmtInt(pct) + '%</span>' +
+    '</div>';
+}
+
 function renderCalendar(d) {
   lastCalendarData = d;
   const el = document.getElementById('calendar');
@@ -826,12 +841,17 @@ function renderCalendar(d) {
   html += '<div class="cal-grid">';
   let col = 0;
   let prevYM = null;
+  let monthStart = principal;   // 本月期初总额（= 上月最后一个交易日总额）
+  let cum = principal;          // 当前累计总额
   for (const day of d.days) {
     const ym = day.date.slice(0, 7);
     if (ym !== prevYM) {
       if (prevYM !== null) {
+        html += monthSummaryHtml(prevYM, cum - monthStart, monthStart);
+        col++;
         while (col % 7 !== 0) { html += '<div class="cal-cell cal-empty"></div>'; col++; }
       }
+      monthStart = cum;
       const parts = day.date.split('-');
       html += '<div class="cal-month">' + parts[0] + '年' + parseInt(parts[1], 10) + '月</div>';
       // 服务端 weekday 定义 0=周一 ... 6=周日，直接作为周一起始网格的列偏移
@@ -846,8 +866,9 @@ function renderCalendar(d) {
     let sub = '';
     if (day.type === 'trading') {
       tradeIndex++;
-      const profit = adjustedDiffs && adjustedDiffs[tradeIndex - 1] != null ? adjustedDiffs[tradeIndex - 1] : (principal * Math.pow(1 + rate, tradeIndex - 1) * rate);
-      sub = '<span class="cal-profit">' + (profit >= 0 ? '+' : '') + fmtCompact(profit) + '</span>';
+      const usedDiff = adjustedDiffs && adjustedDiffs[tradeIndex - 1] != null ? adjustedDiffs[tradeIndex - 1] : (principal * Math.pow(1 + rate, tradeIndex - 1) * rate);
+      cum += usedDiff;
+      sub = '<span class="cal-profit">' + (usedDiff >= 0 ? '+' : '') + fmtCompact(usedDiff) + '</span>';
       if (diffStatus && diffStatus[tradeIndex - 1] === 'below') cls += ' cal-below';
       else if (diffStatus && diffStatus[tradeIndex - 1] === 'above') cls += ' cal-above';
     }
@@ -855,8 +876,9 @@ function renderCalendar(d) {
     html += '<div class="' + cls + '" title="' + day.date + '"><span class="cal-day">' + day.day + '</span>' + badge + sub + '</div>';
     col++;
   }
+  html += monthSummaryHtml(prevYM, cum - monthStart, monthStart);
   html += '</div>';
-  html += '<div class="cal-legend"><span class="lg lg-t">交易日</span><span class="lg lg-w">周末</span><span class="lg lg-h">法定节假日</span></div>';
+  html += '<div class="cal-legend"><span class="lg lg-t">交易日</span><span class="lg lg-w">周末</span><span class="lg lg-h">法定节假日</span><span class="lg lg-sum">月汇总</span></div>';
   el.innerHTML = html;
 }
 
