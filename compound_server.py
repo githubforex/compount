@@ -441,6 +441,9 @@ HTML = r"""<!DOCTYPE html>
   .cal-start { box-shadow:inset 0 0 0 2px var(--green); }
   .cal-end { box-shadow:inset 0 0 0 2px var(--accent); }
   .cal-badge { position:absolute; top:1px; right:4px; font-size:9px; color:var(--red); }
+  .cal-refl { position:absolute; top:0; right:2px; font-size:10px; line-height:1; cursor:pointer; opacity:.55; }
+  .cal-refl:hover { opacity:1; }
+  .cal-refl.has { opacity:1; }
   .cal-profit { display:block; font-size:10px; color:var(--red); margin-top:2px; line-height:1.1; white-space:nowrap; }
   .cal-summary { display:flex; flex-direction:column; justify-content:center; align-items:center; background:rgba(76,110,245,.10); border:1px dashed var(--accent); border-radius:8px; padding:4px 2px; }
   .cal-summary .cal-sum-pnl { font-size:10px; font-weight:700; line-height:1.1; white-space:nowrap; }
@@ -631,7 +634,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="table-scroll">
         <table>
           <thead>
-            <tr><th>期数</th><th>日期</th><th>总额（元）</th><th>差额（元）</th><th>实际表现（元）</th><th>偏差（元）</th><th>反思</th></tr>
+            <tr><th>期数</th><th>日期</th><th>总额（元）</th><th>差额（元）</th><th>实际表现（元）</th><th>偏差（元）</th></tr>
           </thead>
           <tbody id="tbody"></tbody>
         </table>
@@ -743,10 +746,7 @@ function refreshTableDates() {
   rows.forEach(function(tr, i) {
     const td = tr.children[1];
     if (td) td.textContent = lastTradeDates && lastTradeDates[i] ? lastTradeDates[i] : '';
-    const btn = tr.querySelector('.refl-btn');
-    if (btn) btn.dataset.date = lastTradeDates && lastTradeDates[i] ? lastTradeDates[i] : '';
   });
-  updateReflectionButtons();
 }
 
 function updateDeviation(input) {
@@ -873,13 +873,15 @@ function renderCalendar(d) {
       else if (diffStatus && diffStatus[tradeIndex - 1] === 'above') cls += ' cal-above';
     }
     const badge = day.type !== 'trading' ? '<span class="cal-badge">休</span>' : '';
-    html += '<div class="' + cls + '" title="' + day.date + '"><span class="cal-day">' + day.day + '</span>' + badge + sub + '</div>';
+    const refl = day.type === 'trading' ? '<span class="cal-refl" data-date="' + day.date + '" onclick="openReflection(this.dataset.date)">✏️</span>' : '';
+    html += '<div class="' + cls + '" title="' + day.date + '"><span class="cal-day">' + day.day + '</span>' + badge + refl + sub + '</div>';
     col++;
   }
   html += monthSummaryHtml(prevYM, cum - monthStart, monthStart);
   html += '</div>';
   html += '<div class="cal-legend"><span class="lg lg-t">交易日</span><span class="lg lg-w">周末</span><span class="lg lg-h">法定节假日</span><span class="lg lg-sum">月汇总</span></div>';
   el.innerHTML = html;
+  updateReflectionButtons();
 }
 
 async function compute() {
@@ -934,10 +936,8 @@ function render(d) {
     '<td class="num" data-role="amount">' + fmt(r.amount) + '</td>' +
     '<td class="num diff" data-role="diff">+' + fmt(r.diff) + '</td>' +
     '<td><input class="actual-input" type="text" inputmode="decimal" oninput="updateDeviation(this)"></td>' +
-    '<td class="num dev" data-role="dev"></td>' +
-    '<td><button class="refl-btn" data-date="' + (lastTradeDates && lastTradeDates[r.n - 1] ? lastTradeDates[r.n - 1] : '') + '" onclick="openReflection(this.dataset.date)">✏️</button></td></tr>'
+    '<td class="num dev" data-role="dev"></td></tr>'
   ).join('');
-  updateReflectionButtons();
 
   document.getElementById('foot').textContent =
     '共 ' + d.periods + ' 期 · 期末总额 ' + fmt(d.final) + ' 元 · 累计收益 ' + fmt(gain) + ' 元';
@@ -1159,7 +1159,7 @@ function saveReflection() {
 }
 
 function updateReflectionButtons() {
-  document.querySelectorAll('#tbody .refl-btn').forEach(function(btn) {
+  document.querySelectorAll('.cal-refl').forEach(function(btn) {
     const d = btn.dataset.date;
     const key = (currentPlan || '') + '|' + d;
     if (d && reflections[key] && reflections[key].trim()) {
