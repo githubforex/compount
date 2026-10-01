@@ -819,22 +819,25 @@ function renderCalendar(d) {
   lastCalendarData = d;
   const el = document.getElementById('calendar');
   const wk = ['一','二','三','四','五','六','日'];
-  const offset = (d.days[0].weekday + 6) % 7; // 周一起始
   const principal = parseFloat(document.getElementById('principal').value) || 0;
   const rate = parseFloat(document.getElementById('rate').value) / 100;
   let html = '<div class="cal-week">' + wk.map(function(w){return '<div class="cal-head">'+w+'</div>';}).join('') + '</div>';
   let tradeIndex = 0;
   html += '<div class="cal-grid">';
   let col = 0;
-  for (let i = 0; i < offset; i++) { html += '<div class="cal-cell cal-empty"></div>'; col++; }
   let prevYM = null;
   for (const day of d.days) {
     const ym = day.date.slice(0, 7);
     if (ym !== prevYM) {
-      while (col % 7 !== 0) { html += '<div class="cal-cell cal-empty"></div>'; col++; }
+      if (prevYM !== null) {
+        while (col % 7 !== 0) { html += '<div class="cal-cell cal-empty"></div>'; col++; }
+      }
       const parts = day.date.split('-');
       html += '<div class="cal-month">' + parts[0] + '年' + parseInt(parts[1], 10) + '月</div>';
-      col = 0;
+      // 服务端 weekday 定义 0=周一 ... 6=周日，直接作为周一起始网格的列偏移
+      const offset = day.weekday;
+      for (let i = 0; i < offset; i++) { html += '<div class="cal-cell cal-empty"></div>'; }
+      col = offset;
       prevYM = ym;
     }
     let cls = 'cal-cell ' + (day.type === 'trading' ? 'cal-trading' : (day.type === 'holiday' ? 'cal-holiday' : 'cal-weekend'));
