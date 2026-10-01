@@ -150,6 +150,11 @@ def init_db():
                 content LONGTEXT,
                 PRIMARY KEY (username, plan_name, ref_date)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS sessions (
+                token VARCHAR(64) PRIMARY KEY,
+                username VARCHAR(64),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
     finally:
         conn.close()
 
@@ -161,25 +166,48 @@ def hash_password(password, salt=None):
     return salt, h
 
 
-_SESSIONS = {}
-_SESSIONS_LOCK = threading.Lock()
-
-
 def create_session(username):
     token = secrets.token_hex(32)
-    with _SESSIONS_LOCK:
-        _SESSIONS[token] = username
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO sessions (token, username) VALUES (%s, %s)", (token, username))
+        finally:
+            conn.close()
+    except Exception:
+        pass
     return token
 
 
 def get_session_user(token):
-    with _SESSIONS_LOCK:
-        return _SESSIONS.get(token)
+    if not token:
+        return None
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT username FROM sessions WHERE token=%s", (token,))
+                row = cur.fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
 
 
 def delete_session(token):
-    with _SESSIONS_LOCK:
-        _SESSIONS.pop(token, None)
+    if not token:
+        return
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM sessions WHERE token=%s", (token,))
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 def register_user(username, password):
@@ -285,6 +313,7 @@ def compute(principal, rate, periods):
         diff = round(nxt - cur, 2)
         rows.append({
             "n": i,
+            "start": cur,
             "amount": nxt,
             "diff": diff,
             "multiple": round(nxt / principal, 6),
@@ -446,6 +475,7 @@ HTML = r"""<!DOCTYPE html>
   .cal-refl.has { opacity:1; }
   .cal-profit { display:block; font-size:10px; color:var(--red); margin-top:2px; line-height:1.1; white-space:nowrap; }
   .cal-summary { display:flex; flex-direction:column; justify-content:center; align-items:center; background:rgba(76,110,245,.10); border:1px dashed var(--accent); border-radius:8px; padding:4px 2px; }
+  .cal-summary .cal-sum-total { font-size:10px; font-weight:700; color:var(--ink); line-height:1.1; white-space:nowrap; }
   .cal-summary .cal-sum-pnl { font-size:10px; font-weight:700; line-height:1.1; white-space:nowrap; }
   .cal-summary .cal-sum-rate { font-size:9px; color:var(--muted); line-height:1.1; white-space:nowrap; margin-top:1px; }
   .cal-summary.pos .cal-sum-pnl { color:var(--red); }
@@ -634,7 +664,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="table-scroll">
         <table>
           <thead>
-            <tr><th>期数</th><th>日期</th><th>总额（元）</th><th>差额（元）</th><th>实际表现（元）</th><th>偏差（元）</th></tr>
+            <tr><th>期数</th><th>日期</th><th>起始资金（元）</th><th>差额（元）</th><th>实际表现（元）</th><th>偏差（元）</th></tr>
           </thead>
           <tbody id="tbody"></tbody>
         </table>
@@ -772,8 +802,8 @@ function recalculate() {
 
     const diffTd = tr.querySelector('[data-role="diff"]');
     if (diffTd) diffTd.textContent = '+' + fmt(theoryDiff);
-    const amountTd = tr.querySelector('[data-role="amount"]');
-    if (amountTd) amountTd.textContent = fmt(amount);
+    const startTd = tr.querySelector('[data-role="start"]');
+    if (startTd) startTd.textContent = fmt(cur);
     const devTd = tr.querySelector('[data-role="dev"]');
     if (devTd) {
       if (actualVal !== null) {
@@ -821,10 +851,11 @@ function project() {
     });
 }
 
-function monthSummaryHtml(ym, pnl, prevAmount) {
+function monthSummaryHtml(ym, pnl, prevAmount, endAmount) {
   const pct = prevAmount ? (pnl / prevAmount * 100) : 0;
   const cls = pnl >= 0 ? 'pos' : 'neg';
-  return '<div class="cal-cell cal-summary ' + cls + '" title="' + ym + '月：盈亏 ' + (pnl >= 0 ? '+' : '') + fmt(pnl) + ' 元，收益率 ' + (pct >= 0 ? '+' : '') + fmtInt(pct) + '%">' +
+  return '<div class="cal-cell cal-summary ' + cls + '" title="' + ym + '月：月末总额 ' + fmt(endAmount) + ' 元，盈亏 ' + (pnl >= 0 ? '+' : '') + fmt(pnl) + ' 元，收益率 ' + (pct >= 0 ? '+' : '') + fmtInt(pct) + '%">' +
+    '<span class="cal-sum-total">' + fmtCompact(endAmount) + '</span>' +
     '<span class="cal-sum-pnl">' + (pnl >= 0 ? '+' : '') + fmtCompact(pnl) + '</span>' +
     '<span class="cal-sum-rate">' + (pct >= 0 ? '+' : '') + fmtInt(pct) + '%</span>' +
     '</div>';
@@ -847,7 +878,7 @@ function renderCalendar(d) {
     const ym = day.date.slice(0, 7);
     if (ym !== prevYM) {
       if (prevYM !== null) {
-        html += monthSummaryHtml(prevYM, cum - monthStart, monthStart);
+        html += monthSummaryHtml(prevYM, cum - monthStart, monthStart, cum);
         col++;
         while (col % 7 !== 0) { html += '<div class="cal-cell cal-empty"></div>'; col++; }
       }
@@ -877,7 +908,7 @@ function renderCalendar(d) {
     html += '<div class="' + cls + '" title="' + day.date + '"><span class="cal-day">' + day.day + '</span>' + badge + refl + sub + '</div>';
     col++;
   }
-  html += monthSummaryHtml(prevYM, cum - monthStart, monthStart);
+  html += monthSummaryHtml(prevYM, cum - monthStart, monthStart, cum);
   html += '</div>';
   html += '<div class="cal-legend"><span class="lg lg-t">交易日</span><span class="lg lg-w">周末</span><span class="lg lg-h">法定节假日</span><span class="lg lg-sum">月汇总</span></div>';
   el.innerHTML = html;
@@ -933,7 +964,7 @@ function render(d) {
   document.getElementById('tbody').innerHTML = d.rows.map(r =>
     '<tr><td>' + r.n + '</td>' +
     '<td class="num dim">' + (lastTradeDates && lastTradeDates[r.n - 1] ? lastTradeDates[r.n - 1] : '') + '</td>' +
-    '<td class="num" data-role="amount">' + fmt(r.amount) + '</td>' +
+    '<td class="num" data-role="start">' + fmt(r.start) + '</td>' +
     '<td class="num diff" data-role="diff">+' + fmt(r.diff) + '</td>' +
     '<td><input class="actual-input" type="text" inputmode="decimal" oninput="updateDeviation(this)"></td>' +
     '<td class="num dev" data-role="dev"></td></tr>'
@@ -1121,13 +1152,22 @@ function logout() {
   location.reload();
 }
 
+function handleAuthExpired() {
+  sessionStorage.removeItem('token');
+  sessionStorage.removeItem('username');
+  location.reload();
+}
+
 let reflections = {};
 let currentReflectionDate = null;
 
 function loadReflections() {
   fetch('/api/reflections?token=' + encodeURIComponent(authToken))
     .then(function(r){ return r.json(); })
-    .then(function(d){ reflections = d || {}; updateReflectionButtons(); });
+    .then(function(d){
+      if (d && d.error) { handleAuthExpired(); return; }
+      reflections = d || {}; updateReflectionButtons();
+    });
 }
 
 function openReflection(date) {
@@ -1277,7 +1317,10 @@ function escapeHtml(v) {
 function loadPlans() {
   fetch('/api/plans?token=' + encodeURIComponent(authToken))
     .then(function(r){ return r.json(); })
-    .then(function(d){ plans = d || {}; renderPlansTabs(); });
+    .then(function(d){
+      if (d && d.error) { handleAuthExpired(); return; }
+      plans = d || {}; renderPlansTabs();
+    });
 }
 
 function renderPlansTabs() {
