@@ -276,6 +276,18 @@ def save_plan(username, name, params):
         pass
 
 
+def delete_plan(username, name):
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM plans WHERE username=%s AND name=%s", (username, name))
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
 def load_reflections(username):
     try:
         conn = _conn()
@@ -452,9 +464,14 @@ HTML = r"""<!DOCTYPE html>
   }
   .rate-note { font-size:12px; color:var(--muted); margin-top:12px; }
   .plans-tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
-  .plan-tab { border:1px solid var(--line); background:var(--card); border-radius:8px; padding:6px 14px; cursor:pointer; font-size:13px; color:var(--ink); }
+  .plan-tab { border:1px solid var(--line); background:var(--card); border-radius:8px; padding:6px 10px 6px 14px; cursor:pointer; font-size:13px; color:var(--ink); display:inline-flex; align-items:center; gap:6px; }
   .plan-tab.active { background:var(--accent); color:#fff; border-color:var(--accent); }
   .plan-new { border-style:dashed; color:var(--muted); }
+  .plan-tab-label { white-space:nowrap; }
+  .plan-tab-del { font-size:15px; line-height:1; color:var(--muted); font-weight:700; padding:0 2px; }
+  .plan-tab-del:hover { color:var(--red); }
+  .plan-tab.active .plan-tab-del { color:rgba(255,255,255,.7); }
+  .plan-tab.active .plan-tab-del:hover { color:#fff; }
   .project-result { font-size:14px; margin-bottom:14px; }
   .project-result b { color:var(--accent); }
   .calendar { margin-top:6px; }
@@ -507,6 +524,13 @@ HTML = r"""<!DOCTYPE html>
   .actual-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
   .dev-pos { color:var(--red); }
   .dev-neg { color:var(--green); }
+  .rule-idx { text-align:center; color:var(--muted); width:44px; }
+  .rule-date { width:132px; padding:6px 8px; font-size:13px; text-align:center; cursor:pointer; border-radius:6px; }
+  .rule-content { width:100%; padding:6px 10px; font-size:14px; border-radius:6px; }
+  .rule-del { border:none; background:transparent; box-shadow:none; color:var(--muted); font-size:18px; line-height:1; cursor:pointer; padding:0 6px; font-weight:400; }
+  .rule-del:hover { color:var(--red); filter:none; }
+  .rule-del:active { transform:none; box-shadow:none; }
+  .add-rule-btn { padding:8px 18px; font-size:13px; }
   .cal-legend { display:flex; gap:16px; margin-top:10px; font-size:12px; color:var(--muted); }
   .cal-legend .lg::before { content:""; display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; vertical-align:-1px; }
   .lg-t::before { background:var(--accent-tint); }
@@ -514,7 +538,7 @@ HTML = r"""<!DOCTYPE html>
   .lg-h::before { background:rgba(224,49,49,.35); }
   .lg-sum::before { background:rgba(76,110,245,.12); border:1px dashed var(--accent); box-sizing:border-box; }
   .field { position:relative; }
-  .datepicker { position:absolute; left:0; top:calc(100% + 6px); width:292px; background:var(--card); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow-lg); padding:12px; z-index:50; }
+  .datepicker { position:fixed; width:292px; background:var(--card); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow-lg); padding:12px; z-index:50; }
   .dp-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
   .dp-nav { width:30px; height:30px; border:1px solid var(--line); background:var(--card); border-radius:8px; cursor:pointer; font-size:16px; line-height:1; color:var(--ink); }
   .dp-title { font-size:14px; font-weight:700; }
@@ -625,7 +649,7 @@ HTML = r"""<!DOCTYPE html>
       </div>
       <div class="field">
         <label for="start_date">计划起始时间</label>
-        <input id="start_date" type="text" readonly placeholder="点击选择日期" autocomplete="off" onclick="toggleCalendar(event)" value="2026-10-08">
+        <input id="start_date" type="text" readonly placeholder="点击选择日期" autocomplete="off" class="date-input" onclick="openDatePicker(this, event)" value="2026-10-08">
         <div class="datepicker" id="datepicker" style="display:none">
           <div class="dp-head">
             <button type="button" class="dp-nav" onclick="changeMonth(-1)">‹</button>
@@ -670,6 +694,20 @@ HTML = r"""<!DOCTYPE html>
         </table>
       </div>
       <div class="foot" id="foot"></div>
+    </div>
+    <div class="panel">
+      <h2>交易铁律</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>序号</th><th>记录日期</th><th>铁律</th><th></th></tr>
+          </thead>
+          <tbody id="rules_tbody"></tbody>
+        </table>
+      </div>
+      <div class="rules-foot">
+        <button type="button" class="add-rule-btn" onclick="addRule()">+ 添加铁律</button>
+      </div>
     </div>
   </div>
 </div>
@@ -723,13 +761,23 @@ function toggleTheme() {
 
 let dpYear = new Date().getFullYear();
 let dpMonth = new Date().getMonth();
+let activeDateInput = null;
 
-function toggleCalendar(e) {
+function openDatePicker(inputEl, e) {
   if (e) e.stopPropagation();
   const el = document.getElementById('datepicker');
-  const show = el.style.display === 'none';
-  el.style.display = show ? 'block' : 'none';
-  if (show) renderDatePicker();
+  if (activeDateInput === inputEl && el.style.display === 'block') {
+    el.style.display = 'none';
+    return;
+  }
+  activeDateInput = inputEl;
+  const r = inputEl.getBoundingClientRect();
+  el.style.top = (r.bottom + 6) + 'px';
+  el.style.left = r.left + 'px';
+  el.style.display = 'block';
+  const m = /^(\d{4})-(\d{2})/.exec(inputEl.value || '');
+  if (m) { dpYear = parseInt(m[1], 10); dpMonth = parseInt(m[2], 10) - 1; }
+  renderDatePicker();
 }
 
 function changeMonth(delta) {
@@ -759,15 +807,21 @@ function renderDatePicker() {
 function pickDate(d) {
   const dt = new Date(dpYear, dpMonth, d);
   const iso = dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
-  document.getElementById('start_date').value = iso;
+  if (activeDateInput) {
+    activeDateInput.value = iso;
+    const ri = activeDateInput.getAttribute('data-ridx');
+    if (ri != null) rules[parseInt(ri, 10)].date = iso;
+  }
   document.getElementById('datepicker').style.display = 'none';
 }
 
 document.addEventListener('click', function(e) {
   const dp = document.getElementById('datepicker');
-  const inp = document.getElementById('start_date');
-  if (dp && inp && !dp.contains(e.target) && e.target !== inp) {
-    dp.style.display = 'none';
+  if (dp && dp.style.display !== 'none') {
+    const onDateInput = e.target.closest && e.target.closest('.date-input');
+    if (!dp.contains(e.target) && !onDateInput) {
+      dp.style.display = 'none';
+    }
   }
 });
 
@@ -1327,7 +1381,10 @@ function renderPlansTabs() {
   const el = document.getElementById('plans_tabs');
   let html = '';
   for (const name in plans) {
-    html += '<button class="plan-tab' + (name === currentPlan ? ' active' : '') + '" data-name="' + escapeHtml(name) + '">' + escapeHtml(name) + '</button>';
+    html += '<div class="plan-tab' + (name === currentPlan ? ' active' : '') + '" data-name="' + escapeHtml(name) + '">' +
+      '<span class="plan-tab-label">' + escapeHtml(name) + '</span>' +
+      '<span class="plan-tab-del" title="删除计划">×</span>' +
+      '</div>';
   }
   html += '<button class="plan-tab plan-new" data-new="1">+ 新计划</button>';
   el.innerHTML = html;
@@ -1374,10 +1431,35 @@ function savePlan() {
   });
 }
 
+function deletePlan(name) {
+  if (!name) return;
+  if (!confirm('确定删除计划「' + name + '」？')) return;
+  delete plans[name];
+  if (currentPlan === name) {
+    currentPlan = null;
+    document.getElementById('plan_name').value = '';
+    document.getElementById('result').style.display = 'none';
+    document.getElementById('tbody').innerHTML = '';
+  }
+  renderPlansTabs();
+  fetch('/api/plan_delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({token: authToken, name: name})
+  });
+}
+
 document.addEventListener('click', function(e) {
-  const tab = e.target && e.target.closest ? e.target.closest('.plan-tab') : null;
   const tabsEl = document.getElementById('plans_tabs');
-  if (!tab || !tabsEl || !tabsEl.contains(tab)) return;
+  if (!tabsEl) return;
+  const del = e.target && e.target.closest ? e.target.closest('.plan-tab-del') : null;
+  if (del && tabsEl.contains(del)) {
+    const tab = del.closest('.plan-tab');
+    if (tab && tab.dataset.name) deletePlan(tab.dataset.name);
+    return;
+  }
+  const tab = e.target && e.target.closest ? e.target.closest('.plan-tab') : null;
+  if (!tab || !tabsEl.contains(tab)) return;
   if (tab.dataset.new) { newPlan(); }
   else if (tab.dataset.name) { switchPlan(tab.dataset.name); }
 });
@@ -1385,6 +1467,33 @@ document.addEventListener('click', function(e) {
 if (authToken) {
   enterApp();
 }
+
+let rules = [{date:'', content:''}];
+
+function renderRules() {
+  const tbody = document.getElementById('rules_tbody');
+  tbody.innerHTML = rules.map(function(r, i) {
+    return '<tr>' +
+      '<td class="rule-idx">' + (i + 1) + '</td>' +
+      '<td><input class="date-input rule-date" type="text" readonly placeholder="选择日期" data-ridx="' + i + '" value="' + escapeHtml(r.date || '') + '" onclick="openDatePicker(this, event)"></td>' +
+      '<td><input class="rule-content" type="text" placeholder="例如：单笔亏损不超过 5%" data-ridx="' + i + '" value="' + escapeHtml(r.content || '') + '" oninput="rules[this.dataset.ridx].content = this.value"></td>' +
+      '<td><button type="button" class="rule-del" onclick="removeRule(' + i + ')" title="删除">×</button></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function addRule() {
+  rules.push({date:'', content:''});
+  renderRules();
+}
+
+function removeRule(i) {
+  if (rules.length <= 1) { rules = [{date:'', content:''}]; }
+  else { rules.splice(i, 1); }
+  renderRules();
+}
+
+renderRules();
 
 </script>
 <div class="modal-overlay" id="refl_overlay" style="display:none">
@@ -1480,7 +1589,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path in ("/api/register", "/api/login", "/api/logout", "/api/reflection", "/api/plan"):
+        if parsed.path in ("/api/register", "/api/login", "/api/logout", "/api/reflection", "/api/plan", "/api/plan_delete"):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length).decode("utf-8")
@@ -1542,6 +1651,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(400, json.dumps({"error": "name required"}), "application/json; charset=utf-8")
                     return
                 save_plan(user, name, params)
+                self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
+                return
+
+            if parsed.path == "/api/plan_delete":
+                name = (data.get("name") or "").strip()
+                if not name:
+                    self._send(400, json.dumps({"error": "name required"}), "application/json; charset=utf-8")
+                    return
+                delete_plan(user, name)
                 self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
                 return
 
