@@ -155,6 +155,10 @@ def init_db():
                 username VARCHAR(64),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS signals (
+                username VARCHAR(64) PRIMARY KEY,
+                data LONGTEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
     finally:
         conn.close()
 
@@ -311,6 +315,36 @@ def save_reflection(username, plan_name, ref_date, content):
                                VALUES (%s, %s, %s, %s)
                                ON DUPLICATE KEY UPDATE content=VALUES(content)""",
                             (username, plan_name, ref_date, content))
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def load_signals(username):
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT data FROM signals WHERE username=%s", (username,))
+                row = cur.fetchone()
+            if row and row[0]:
+                return json.loads(row[0])
+            return []
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
+def save_signals(username, data):
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO signals (username, data) VALUES (%s, %s)
+                               ON DUPLICATE KEY UPDATE data=VALUES(data)""",
+                            (username, data))
         finally:
             conn.close()
     except Exception:
@@ -508,9 +542,16 @@ HTML = r"""<!DOCTYPE html>
   .modal-toolbar { display:flex; align-items:center; gap:10px; padding:10px 18px; border-bottom:1px solid var(--line); }
   .tb-btn { border:1px solid var(--line); background:var(--card); border-radius:8px; padding:6px 12px; cursor:pointer; font-size:13px; color:var(--ink); }
   .tb-hint { font-size:12px; color:var(--muted); }
-  .refl-editor { flex:1; overflow-y:auto; padding:16px 18px; min-height:240px; font-size:14px; line-height:1.6; color:var(--ink); outline:none; }
-  .refl-editor:empty::before { content:attr(data-placeholder); color:var(--muted); }
+  .refl-editor { flex:1; overflow-y:auto; margin:14px 18px 10px; padding:16px 18px; min-height:240px; font-size:14px; line-height:1.6; color:var(--ink); outline:none; border:1px solid transparent; border-radius:14px; background:linear-gradient(var(--card),var(--card)) padding-box, var(--grad) border-box; box-shadow:0 1px 2px rgba(0,0,0,.10); transition:box-shadow .3s ease; }
+  .refl-editor:hover { box-shadow:0 0 0 3px var(--accent-tint); }
+  .refl-editor:focus, .refl-editor:focus-within { animation:reflGlow 2.2s ease-in-out infinite; }
+  .refl-editor:empty::before { content:attr(data-placeholder); color:var(--muted); opacity:.75; font-style:italic; }
+  @keyframes reflGlow {
+    0%, 100% { box-shadow:0 0 0 3px var(--accent-tint), 0 0 16px rgba(76,110,245,.30), 0 0 32px rgba(124,58,237,.12); }
+    50% { box-shadow:0 0 0 4px var(--accent-tint), 0 0 26px rgba(76,110,245,.55), 0 0 52px rgba(124,58,237,.28); }
+  }
   .refl-editor img { max-width:100%; border-radius:8px; border:1px solid var(--line); }
+  .refl-img-area { border-top:1px solid var(--line); padding:12px 18px; max-height:220px; overflow-y:auto; }
   .img-wrap { position:relative; display:inline-block; margin:4px 4px 4px 0; }
   .img-wrap img { max-width:100%; border-radius:8px; border:1px solid var(--line); display:block; }
   .img-del { position:absolute; top:4px; right:4px; width:22px; height:22px; border:none; border-radius:50%; background:rgba(0,0,0,.55); color:#fff; font-size:14px; line-height:1; cursor:pointer; display:none; align-items:center; justify-content:center; }
@@ -531,6 +572,33 @@ HTML = r"""<!DOCTYPE html>
   .rule-del:hover { color:var(--red); filter:none; }
   .rule-del:active { transform:none; box-shadow:none; }
   .add-rule-btn { padding:8px 18px; font-size:13px; }
+  #signals_tbody td { vertical-align:top; }
+  .sig-name { width:150px; padding:6px 8px; font-size:13px; border-radius:6px; }
+  .sig-summary { width:100%; min-height:52px; padding:6px 8px; font-size:13px; border-radius:6px; resize:vertical; font-family:inherit; border:1px solid var(--line); background:var(--card); color:var(--ink); line-height:1.5; }
+  .sig-summary:focus { border-color:var(--accent); outline:none; box-shadow:0 0 0 3px var(--accent-tint); }
+  .sig-img-cell { width:110px; text-align:center; }
+  .sig-edit-btn { border:none; background:transparent; cursor:pointer; font-size:16px; padding:4px 8px; box-shadow:none; font-weight:400; color:inherit; border-radius:6px; }
+  .sig-edit-btn:hover { filter:none; background:var(--hover-bg); }
+  .sig-edit-btn:active { transform:none; box-shadow:none; }
+  .sig-count { font-size:12px; color:var(--accent); margin-left:2px; }
+  .sig-editor { flex:1; overflow-y:auto; padding:16px 18px; min-height:240px; outline:none; }
+  .sig-img-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(var(--sig-thumb, 120px), 1fr)); gap:8px; }
+  .sig-img-wrap { position:relative; }
+  .sig-img-wrap img { width:100%; aspect-ratio:1; object-fit:cover; border-radius:6px; border:1px solid var(--line); cursor:zoom-in; display:block; background:var(--th-bg); }
+  .sig-img-del { position:absolute; top:3px; right:3px; width:20px; height:20px; border:none; border-radius:50%; background:rgba(0,0,0,.55); color:#fff; font-size:13px; line-height:1; cursor:pointer; display:none; align-items:center; justify-content:center; padding:0; box-shadow:none; }
+  .sig-img-wrap:hover .sig-img-del { display:flex; }
+  .sig-img-del:hover { filter:none; }
+  .sig-img-del:active { transform:none; box-shadow:none; }
+  .sig-img-empty { grid-column:1 / -1; color:var(--muted); font-size:12px; padding:14px; text-align:center; border:1px dashed var(--line); border-radius:6px; }
+  .sig-lightbox { position:fixed; inset:0; background:rgba(0,0,0,.85); display:flex; align-items:center; justify-content:center; z-index:250; cursor:zoom-out; }
+  .sig-lightbox img { max-width:94vw; max-height:94vh; border-radius:8px; box-shadow:0 20px 60px rgba(0,0,0,.5); transition:transform .15s ease; transform-origin:center center; }
+  .sig-lb-toolbar { position:fixed; top:16px; right:16px; display:flex; gap:8px; align-items:center; background:rgba(0,0,0,.6); padding:8px 12px; border-radius:10px; z-index:251; }
+  .sig-lb-toolbar button { padding:4px 10px; font-size:14px; border:none; background:rgba(255,255,255,.15); color:#fff; border-radius:6px; cursor:pointer; box-shadow:none; }
+  .sig-lb-toolbar button:hover { filter:none; }
+  .sig-lb-toolbar button:active { transform:none; box-shadow:none; }
+  .sig-lb-zoom { color:#fff; font-size:13px; min-width:44px; text-align:center; font-variant-numeric:tabular-nums; }
+  .sig-lb-count { color:#fff; font-size:13px; min-width:56px; text-align:center; font-variant-numeric:tabular-nums; }
+  .sig-lb-close { width:30px; height:30px; font-size:16px; line-height:1; }
   .cal-legend { display:flex; gap:16px; margin-top:10px; font-size:12px; color:var(--muted); }
   .cal-legend .lg::before { content:""; display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; vertical-align:-1px; }
   .lg-t::before { background:var(--accent-tint); }
@@ -707,6 +775,20 @@ HTML = r"""<!DOCTYPE html>
       </div>
       <div class="rules-foot">
         <button type="button" class="add-rule-btn" onclick="addRule()">+ 添加铁律</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>交易信号</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>序号</th><th>信号名称</th><th>概述</th><th>信号模板</th></tr>
+          </thead>
+          <tbody id="signals_tbody"></tbody>
+        </table>
+      </div>
+      <div class="rules-foot">
+        <button type="button" class="add-rule-btn" onclick="addSignal()">+ 添加信号</button>
       </div>
     </div>
   </div>
@@ -1195,6 +1277,7 @@ function enterApp() {
   document.getElementById('user_name').textContent = authUser;
   loadPlans();
   loadReflections();
+  loadSignals();
 }
 
 function logout() {
@@ -1214,6 +1297,7 @@ function handleAuthExpired() {
 
 let reflections = {};
 let currentReflectionDate = null;
+let reflImages = [];
 
 function loadReflections() {
   fetch('/api/reflections?token=' + encodeURIComponent(authToken))
@@ -1229,7 +1313,18 @@ function openReflection(date) {
   currentReflectionDate = date;
   const key = (currentPlan || '') + '|' + date;
   document.getElementById('refl_title').textContent = '反思 · ' + date;
-  document.getElementById('refl_editor').innerHTML = reflections[key] || '';
+  const content = reflections[key] || '';
+  const tmp = document.createElement('div');
+  tmp.innerHTML = content;
+  const imgs = Array.from(tmp.querySelectorAll('.img-wrap img')).map(function(img){ return img.src; });
+  tmp.querySelectorAll('.img-wrap').forEach(function(w) {
+    const next = w.nextSibling;
+    if (next && next.nodeName === 'BR') next.remove();
+    w.remove();
+  });
+  document.getElementById('refl_editor').innerHTML = tmp.innerHTML;
+  reflImages = imgs;
+  renderReflThumbs();
   document.getElementById('refl_overlay').style.display = 'flex';
 }
 
@@ -1240,7 +1335,11 @@ function closeReflection() {
 
 function saveReflection() {
   if (!currentReflectionDate) return;
-  const content = document.getElementById('refl_editor').innerHTML;
+  const textHtml = document.getElementById('refl_editor').innerHTML;
+  const imgsHtml = reflImages.map(function(src) {
+    return '<div class="img-wrap" contenteditable="false"><img src="' + src + '" alt="行情截图"><button class="img-del" type="button">×</button></div>';
+  }).join('');
+  const content = textHtml + imgsHtml;
   fetch('/api/reflection', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1268,48 +1367,41 @@ function updateReflectionButtons() {
   });
 }
 
-function insertImageAtCursor(dataUrl) {
-  const editor = document.getElementById('refl_editor');
-  if (!editor) return;
-  editor.focus();
-  const wrap = document.createElement('div');
-  wrap.className = 'img-wrap';
-  wrap.contentEditable = 'false';
-  const img = document.createElement('img');
-  img.src = dataUrl;
-  img.alt = '行情截图';
-  const del = document.createElement('button');
-  del.className = 'img-del';
-  del.type = 'button';
-  del.textContent = '×';
-  wrap.appendChild(img);
-  wrap.appendChild(del);
-  const sel = window.getSelection();
-  if (sel && sel.rangeCount > 0 && editor.contains(sel.anchorNode)) {
-    const range = sel.getRangeAt(0);
-    range.deleteContents();
-    range.insertNode(wrap);
-    const br = document.createElement('br');
-    range.setStartAfter(wrap);
-    range.insertNode(br);
-    range.setStartAfter(br);
-    range.collapse(true);
-    sel.removeAllRanges();
-    sel.addRange(range);
-  } else {
-    editor.appendChild(wrap);
-    editor.appendChild(document.createElement('br'));
-  }
+function renderReflThumbs() {
+  const grid = document.getElementById('refl_img_grid');
+  if (!grid) return;
+  grid.innerHTML = reflImages.length ? reflImages.map(function(src, k) {
+    return '<div class="sig-img-wrap">' +
+      '<img class="sig-img" src="' + src + '" alt="行情截图" onclick="openLightbox(' + k + ')">' +
+      '<button type="button" class="sig-img-del" onclick="removeReflImage(' + k + ')" title="删除图片">×</button>' +
+      '</div>';
+  }).join('') : '';
 }
 
-function removeImage(btn) {
-  const wrap = btn.closest('.img-wrap');
-  if (wrap) wrap.remove();
+function removeReflImage(k) {
+  reflImages.splice(k, 1);
+  renderReflThumbs();
 }
 
-function openLightbox(src) {
-  document.getElementById('lightbox_img').src = src;
+function openLightbox(idx) {
+  reflLbImages = reflImages;
+  reflLbIdx = idx;
+  if (!reflLbImages.length) return;
+  showReflLightboxImage();
   document.getElementById('lightbox').style.display = 'flex';
+}
+
+function showReflLightboxImage() {
+  reflLbIdx = ((reflLbIdx % reflLbImages.length) + reflLbImages.length) % reflLbImages.length;
+  document.getElementById('lightbox_img').src = reflLbImages[reflLbIdx];
+  const cnt = document.getElementById('refl_lb_count');
+  if (cnt) cnt.textContent = (reflLbIdx + 1) + ' / ' + reflLbImages.length;
+}
+
+function stepReflLightbox(delta) {
+  if (!reflLbImages.length) return;
+  reflLbIdx += delta;
+  showReflLightboxImage();
 }
 
 function closeLightbox() {
@@ -1320,45 +1412,42 @@ function insertReflectionImage() {
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = 'image/*';
+  input.multiple = true;
   input.onchange = function() {
-    const file = input.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = function(e) {
-      insertImageAtCursor(e.target.result);
-    };
-    reader.readAsDataURL(file);
+    const files = Array.from(input.files || []);
+    Promise.all(files.map(function(file) {
+      return new Promise(function(resolve) {
+        const reader = new FileReader();
+        reader.onload = function(e) { resolve(e.target.result); };
+        reader.onerror = function() { resolve(null); };
+        reader.readAsDataURL(file);
+      });
+    })).then(function(results) {
+      results.forEach(function(src) { if (src) reflImages.push(src); });
+      renderReflThumbs();
+    });
   };
   input.click();
 }
 
-document.addEventListener('DOMContentLoaded', function() {
-  const editor = document.getElementById('refl_editor');
-  if (!editor) return;
-  editor.addEventListener('dblclick', function(e) {
-    const img = e.target && e.target.closest ? e.target.closest('img') : null;
-    if (img && img.src) openLightbox(img.src);
-  });
-  editor.addEventListener('click', function(e) {
-    const del = e.target && e.target.closest ? e.target.closest('.img-del') : null;
-    if (del) removeImage(del);
-  });
-  editor.addEventListener('paste', function(e) {
-    const items = e.clipboardData && e.clipboardData.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.type && item.type.indexOf('image') === 0) {
-        e.preventDefault();
-        const blob = item.getAsFile();
-        const reader = new FileReader();
-        reader.onload = function(ev) {
-          insertImageAtCursor(ev.target.result);
-        };
-        reader.readAsDataURL(blob);
-        break;
-      }
+document.addEventListener('paste', function(e) {
+  const t = e.target.closest && e.target.closest('#refl_editor, #refl_img_area');
+  if (!t) return;
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type && item.type.indexOf('image') === 0) {
+      e.preventDefault();
+      const blob = item.getAsFile();
+      const reader = new FileReader();
+      reader.onload = function(ev) {
+        reflImages.push(ev.target.result);
+        renderReflThumbs();
+      };
+      reader.readAsDataURL(blob);
+      break;
     }
-  });
+  }
 });
 
 let plans = {};
@@ -1495,6 +1584,246 @@ function removeRule(i) {
 
 renderRules();
 
+let signals = [];
+let saveSignalsTimer = null;
+let activeSignalIdx = null;
+let sigThumbSize = 120;
+let bigZoom = 1;
+let lbImages = [];
+let lbIdx = 0;
+let reflLbImages = [];
+let reflLbIdx = 0;
+
+function loadSignals() {
+  fetch('/api/signals?token=' + encodeURIComponent(authToken))
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (d && d.error) { handleAuthExpired(); return; }
+      signals = (Array.isArray(d) ? d : []).map(function(s) {
+        return {name: s.name || '', summary: s.summary || '', images: Array.isArray(s.images) ? s.images : []};
+      });
+      renderSignals();
+    });
+}
+
+function renderSignals() {
+  const tbody = document.getElementById('signals_tbody');
+  if (!tbody) return;
+  tbody.innerHTML = signals.map(function(s, i) {
+    const count = (s.images || []).length;
+    return '<tr>' +
+      '<td class="rule-idx">' + (i + 1) + '</td>' +
+      '<td><input class="sig-name" type="text" placeholder="如：突破信号" data-sidx="' + i + '" value="' + escapeHtml(s.name || '') + '" oninput="signals[this.dataset.sidx].name = this.value; scheduleSaveSignals()" onblur="saveSignals()"></td>' +
+      '<td><textarea class="sig-summary" placeholder="概述该信号的判断依据..." data-sidx="' + i + '" oninput="signals[this.dataset.sidx].summary = this.value; scheduleSaveSignals()" onblur="saveSignals()">' + escapeHtml(s.summary || '') + '</textarea></td>' +
+      '<td class="sig-img-cell">' +
+        '<button type="button" class="sig-edit-btn" onclick="openSignalImages(' + i + ')" title="编辑信号模板">✏️' +
+          (count ? '<span class="sig-count">' + count + '</span>' : '') +
+        '</button>' +
+        '<button type="button" class="rule-del" onclick="removeSignal(' + i + ')" title="删除该信号">×</button>' +
+      '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function scheduleSaveSignals() {
+  clearTimeout(saveSignalsTimer);
+  saveSignalsTimer = setTimeout(saveSignals, 600);
+}
+
+function saveSignals() {
+  fetch('/api/signals', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({token: authToken, signals: signals})
+  });
+}
+
+function addSignal() {
+  signals.push({name:'', summary:'', images:[]});
+  renderSignals();
+  saveSignals();
+}
+
+function removeSignal(i) {
+  if (!confirm('确定删除该信号？')) return;
+  signals.splice(i, 1);
+  renderSignals();
+  saveSignals();
+}
+
+function removeSignalImage(k) {
+  if (activeSignalIdx == null) return;
+  if (signals[activeSignalIdx] && signals[activeSignalIdx].images) signals[activeSignalIdx].images.splice(k, 1);
+  renderSignalThumbs();
+  renderSignals();
+  saveSignals();
+}
+
+function insertSignalImage() {
+  if (activeSignalIdx == null) return;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.multiple = true;
+  input.onchange = function() {
+    const files = Array.from(input.files || []);
+    Promise.all(files.map(function(file) {
+      return new Promise(function(resolve) {
+        const reader = new FileReader();
+        reader.onload = function(e) { resolve(e.target.result); };
+        reader.onerror = function() { resolve(null); };
+        reader.readAsDataURL(file);
+      });
+    })).then(function(results) {
+      if (!signals[activeSignalIdx]) signals[activeSignalIdx] = {name:'', summary:'', images:[]};
+      if (!signals[activeSignalIdx].images) signals[activeSignalIdx].images = [];
+      results.forEach(function(src) { if (src) signals[activeSignalIdx].images.push(src); });
+      renderSignalThumbs();
+      renderSignals();
+      saveSignals();
+    });
+  };
+  input.click();
+}
+
+document.addEventListener('paste', function(e) {
+  const editor = e.target.closest && e.target.closest('#sig_editor');
+  if (!editor) return;
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type && item.type.indexOf('image') === 0) {
+      e.preventDefault();
+      const blob = item.getAsFile();
+      const reader = new FileReader();
+      reader.onload = function(ev) {
+        if (activeSignalIdx == null) return;
+        if (!signals[activeSignalIdx]) signals[activeSignalIdx] = {name:'', summary:'', images:[]};
+        if (!signals[activeSignalIdx].images) signals[activeSignalIdx].images = [];
+        signals[activeSignalIdx].images.push(ev.target.result);
+        renderSignalThumbs();
+        renderSignals();
+        saveSignals();
+      };
+      reader.readAsDataURL(blob);
+      break;
+    }
+  }
+});
+
+function openSignalImages(idx) {
+  activeSignalIdx = idx;
+  if (!signals[idx]) signals[idx] = {name:'', summary:'', images:[]};
+  document.getElementById('sig_title').textContent = '信号模板 · ' + (signals[idx].name || ('信号 ' + (idx + 1)));
+  renderSignalThumbs();
+  document.getElementById('sig_overlay').style.display = 'flex';
+}
+
+function closeSignalImages() {
+  document.getElementById('sig_overlay').style.display = 'none';
+  activeSignalIdx = null;
+}
+
+function renderSignalThumbs() {
+  const grid = document.getElementById('sig_img_grid');
+  if (!grid) return;
+  grid.style.setProperty('--sig-thumb', sigThumbSize + 'px');
+  const imgs = (activeSignalIdx != null && signals[activeSignalIdx] && signals[activeSignalIdx].images) || [];
+  grid.innerHTML = imgs.length ? imgs.map(function(src, k) {
+    return '<div class="sig-img-wrap">' +
+      '<img class="sig-img" src="' + src + '" alt="信号模板" onclick="openSignalLightbox(' + k + ')">' +
+      '<button type="button" class="sig-img-del" onclick="removeSignalImage(' + k + ')" title="删除模板">×</button>' +
+      '</div>';
+  }).join('') : '<div class="sig-img-empty">暂无模板，点击「插入图片」或在此 Ctrl+V 粘贴</div>';
+}
+
+function zoomSignalThumbs(delta) {
+  sigThumbSize = Math.min(320, Math.max(60, sigThumbSize + delta * 40));
+  renderSignalThumbs();
+}
+
+function openSignalLightbox(idx) {
+  lbImages = (activeSignalIdx != null && signals[activeSignalIdx] && signals[activeSignalIdx].images) || [];
+  lbIdx = idx;
+  if (!lbImages.length) return;
+  bigZoom = 1;
+  showLightboxImage();
+  applyBigZoom();
+  document.getElementById('sig_lightbox').style.display = 'flex';
+}
+
+function showLightboxImage() {
+  if (!lbImages.length) return;
+  lbIdx = ((lbIdx % lbImages.length) + lbImages.length) % lbImages.length;
+  document.getElementById('sig_lightbox_img').src = lbImages[lbIdx];
+  const cnt = document.getElementById('sig_lb_count');
+  if (cnt) cnt.textContent = (lbIdx + 1) + ' / ' + lbImages.length;
+}
+
+function stepLightbox(delta) {
+  if (!lbImages.length) return;
+  lbIdx += delta;
+  showLightboxImage();
+}
+
+function applyBigZoom() {
+  const img = document.getElementById('sig_lightbox_img');
+  img.style.transform = 'scale(' + bigZoom + ')';
+  document.getElementById('sig_lb_zoom').textContent = Math.round(bigZoom * 100) + '%';
+}
+
+function zoomBigImage(delta) {
+  bigZoom = Math.min(6, Math.max(0.2, bigZoom + delta * 0.25));
+  applyBigZoom();
+}
+
+function resetBigImage() {
+  bigZoom = 1;
+  applyBigZoom();
+}
+
+function closeSignalLightbox() {
+  document.getElementById('sig_lightbox').style.display = 'none';
+}
+
+document.addEventListener('wheel', function(e) {
+  const lb = document.getElementById('sig_lightbox');
+  if (!lb || lb.style.display === 'none') return;
+  e.preventDefault();
+  bigZoom = Math.min(6, Math.max(0.2, bigZoom + (e.deltaY < 0 ? 0.1 : -0.1)));
+  applyBigZoom();
+}, { passive: false });
+
+document.addEventListener('keydown', function(e) {
+  const slb = document.getElementById('sig_lightbox');
+  if (slb && slb.style.display !== 'none') {
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      stepLightbox(-1);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      stepLightbox(1);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSignalLightbox();
+    }
+    return;
+  }
+  const lb = document.getElementById('lightbox');
+  if (lb && lb.style.display !== 'none') {
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      stepReflLightbox(-1);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      stepReflLightbox(1);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeLightbox();
+    }
+  }
+});
+
 </script>
 <div class="modal-overlay" id="refl_overlay" style="display:none">
   <div class="modal">
@@ -1507,6 +1836,9 @@ renderRules();
       <span class="tb-hint">可直接 Ctrl+V 粘贴行情截图</span>
     </div>
     <div class="refl-editor" id="refl_editor" contenteditable="true" data-placeholder="写反思、粘贴行情走势图截图..."></div>
+    <div class="refl-img-area" id="refl_img_area">
+      <div class="sig-img-grid" id="refl_img_grid"></div>
+    </div>
     <div class="modal-foot">
       <button class="save-btn" onclick="saveReflection()">保存</button>
       <button class="cancel-btn" onclick="closeReflection()">取消</button>
@@ -1514,7 +1846,46 @@ renderRules();
   </div>
 </div>
 <div class="lightbox" id="lightbox" style="display:none" onclick="closeLightbox()">
+  <div class="sig-lb-toolbar" onclick="event.stopPropagation()">
+    <button type="button" onclick="stepReflLightbox(-1)" title="上一张">‹</button>
+    <span class="sig-lb-count" id="refl_lb_count"></span>
+    <button type="button" onclick="stepReflLightbox(1)" title="下一张">›</button>
+    <button type="button" class="sig-lb-close" onclick="closeLightbox()">×</button>
+  </div>
   <img id="lightbox_img" src="" alt="原图">
+</div>
+<div class="modal-overlay" id="sig_overlay" style="display:none">
+  <div class="modal">
+    <div class="modal-head">
+      <span id="sig_title">信号模板</span>
+      <button class="modal-close" onclick="closeSignalImages()">×</button>
+    </div>
+    <div class="modal-toolbar">
+      <button class="tb-btn" onclick="insertSignalImage()">🖼 插入图片</button>
+      <button class="tb-btn" onclick="zoomSignalThumbs(-1)">➖ 缩小</button>
+      <button class="tb-btn" onclick="zoomSignalThumbs(1)">➕ 放大</button>
+      <span class="tb-hint">可直接 Ctrl+V 粘贴模板图片 · 点击缩略图可放大查看</span>
+    </div>
+    <div class="sig-editor" id="sig_editor" tabindex="0">
+      <div class="sig-img-grid" id="sig_img_grid"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="save-btn" onclick="closeSignalImages()">完成</button>
+    </div>
+  </div>
+</div>
+<div class="sig-lightbox" id="sig_lightbox" style="display:none" onclick="closeSignalLightbox()">
+  <div class="sig-lb-toolbar" onclick="event.stopPropagation()">
+    <button type="button" onclick="stepLightbox(-1)" title="上一张">‹</button>
+    <span class="sig-lb-count" id="sig_lb_count"></span>
+    <button type="button" onclick="stepLightbox(1)" title="下一张">›</button>
+    <button type="button" onclick="zoomBigImage(-1)">−</button>
+    <span class="sig-lb-zoom" id="sig_lb_zoom">100%</span>
+    <button type="button" onclick="zoomBigImage(1)">+</button>
+    <button type="button" onclick="resetBigImage()">重置</button>
+    <button type="button" class="sig-lb-close" onclick="closeSignalLightbox()">×</button>
+  </div>
+  <img id="sig_lightbox_img" src="" alt="信号模板大图" onclick="event.stopPropagation()">
 </div>
 </body>
 </html>
@@ -1576,6 +1947,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(load_plans(user), ensure_ascii=False), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/signals":
+            q = parse_qs(parsed.query)
+            token = q.get("token", [None])[0]
+            user = get_session_user(token) if token else None
+            if not user:
+                self._send(401, json.dumps({"error": "未登录"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps(load_signals(user), ensure_ascii=False), "application/json; charset=utf-8")
+            return
         if parsed.path == "/favicon.ico":
             self._send(204, "", "text/plain")
             return
@@ -1589,7 +1969,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path in ("/api/register", "/api/login", "/api/logout", "/api/reflection", "/api/plan", "/api/plan_delete"):
+        if parsed.path in ("/api/register", "/api/login", "/api/logout", "/api/reflection", "/api/plan", "/api/plan_delete", "/api/signals"):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length).decode("utf-8")
@@ -1660,6 +2040,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(400, json.dumps({"error": "name required"}), "application/json; charset=utf-8")
                     return
                 delete_plan(user, name)
+                self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
+                return
+
+            if parsed.path == "/api/signals":
+                signals_data = data.get("signals")
+                if not isinstance(signals_data, list):
+                    self._send(400, json.dumps({"error": "signals required"}), "application/json; charset=utf-8")
+                    return
+                save_signals(user, json.dumps(signals_data, ensure_ascii=False))
                 self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
                 return
 
