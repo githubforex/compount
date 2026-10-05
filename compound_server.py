@@ -574,8 +574,15 @@ HTML = r"""<!DOCTYPE html>
   .add-rule-btn { padding:8px 18px; font-size:13px; }
   #signals_tbody td { vertical-align:top; }
   .sig-name { width:150px; padding:6px 8px; font-size:13px; border-radius:6px; }
-  .sig-summary { width:100%; min-height:52px; padding:6px 8px; font-size:13px; border-radius:6px; resize:vertical; font-family:inherit; border:1px solid var(--line); background:var(--card); color:var(--ink); line-height:1.5; }
+  .sig-summary { width:100%; padding:6px 8px; font-size:13px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); }
   .sig-summary:focus { border-color:var(--accent); outline:none; box-shadow:0 0 0 3px var(--accent-tint); }
+  .sig-summary-cell { min-width:240px; }
+  .sig-summary-row { display:flex; gap:4px; align-items:center; margin-bottom:4px; }
+  .sig-summary-row .sig-summary { flex:1; }
+  .sig-summary-del { border:none; background:transparent; color:var(--muted); font-size:16px; line-height:1; cursor:pointer; padding:0 4px; box-shadow:none; }
+  .sig-summary-del:hover { color:var(--red); }
+  .sig-summary-add { border:1px dashed var(--line); background:transparent; color:var(--accent); font-size:12px; border-radius:6px; padding:3px 10px; cursor:pointer; box-shadow:none; }
+  .sig-summary-add:hover { background:var(--hover-bg); }
   .sig-img-cell { width:110px; text-align:center; }
   .sig-edit-btn { border:none; background:transparent; cursor:pointer; font-size:16px; padding:4px 8px; box-shadow:none; font-weight:400; color:inherit; border-radius:6px; }
   .sig-edit-btn:hover { filter:none; background:var(--hover-bg); }
@@ -1600,7 +1607,8 @@ function loadSignals() {
     .then(function(d){
       if (d && d.error) { handleAuthExpired(); return; }
       signals = (Array.isArray(d) ? d : []).map(function(s) {
-        return {name: s.name || '', summary: s.summary || '', images: Array.isArray(s.images) ? s.images : []};
+        var summaries = Array.isArray(s.summaries) ? s.summaries : (s.summary ? [s.summary] : ['']);
+        return {name: s.name || '', summaries: summaries, images: Array.isArray(s.images) ? s.images : []};
       });
       renderSignals();
     });
@@ -1611,10 +1619,19 @@ function renderSignals() {
   if (!tbody) return;
   tbody.innerHTML = signals.map(function(s, i) {
     const count = (s.images || []).length;
+    const summaries = (Array.isArray(s.summaries) && s.summaries.length) ? s.summaries : [''];
+    const summaryRows = summaries.map(function(sum, k) {
+      return '<div class="sig-summary-row">' +
+        '<input class="sig-summary" type="text" placeholder="概述该信号的判断依据..." data-sidx="' + i + '" data-ssidx="' + k + '" value="' + escapeHtml(sum) + '" oninput="signals[this.dataset.sidx].summaries[this.dataset.ssidx] = this.value; scheduleSaveSignals()" onblur="saveSignals()">' +
+        '<button type="button" class="sig-summary-del" onclick="removeSignalSummary(' + i + ',' + k + ')" title="删除该概述">×</button>' +
+        '</div>';
+    }).join('');
     return '<tr>' +
       '<td class="rule-idx">' + (i + 1) + '</td>' +
       '<td><input class="sig-name" type="text" placeholder="如：突破信号" data-sidx="' + i + '" value="' + escapeHtml(s.name || '') + '" oninput="signals[this.dataset.sidx].name = this.value; scheduleSaveSignals()" onblur="saveSignals()"></td>' +
-      '<td><textarea class="sig-summary" placeholder="概述该信号的判断依据..." data-sidx="' + i + '" oninput="signals[this.dataset.sidx].summary = this.value; scheduleSaveSignals()" onblur="saveSignals()">' + escapeHtml(s.summary || '') + '</textarea></td>' +
+      '<td class="sig-summary-cell">' + summaryRows +
+        '<button type="button" class="sig-summary-add" onclick="addSignalSummary(' + i + ')">+ 添加概述</button>' +
+      '</td>' +
       '<td class="sig-img-cell">' +
         '<button type="button" class="sig-edit-btn" onclick="openSignalImages(' + i + ')" title="编辑信号模板">✏️' +
           (count ? '<span class="sig-count">' + count + '</span>' : '') +
@@ -1639,7 +1656,24 @@ function saveSignals() {
 }
 
 function addSignal() {
-  signals.push({name:'', summary:'', images:[]});
+  signals.push({name:'', summaries:[''], images:[]});
+  renderSignals();
+  saveSignals();
+}
+
+function addSignalSummary(i) {
+  if (!signals[i]) return;
+  if (!Array.isArray(signals[i].summaries)) signals[i].summaries = [];
+  signals[i].summaries.push('');
+  renderSignals();
+  saveSignals();
+}
+
+function removeSignalSummary(i, k) {
+  const s = signals[i];
+  if (!s || !Array.isArray(s.summaries)) return;
+  s.summaries.splice(k, 1);
+  if (!s.summaries.length) s.summaries.push('');
   renderSignals();
   saveSignals();
 }
@@ -1675,7 +1709,7 @@ function insertSignalImage() {
         reader.readAsDataURL(file);
       });
     })).then(function(results) {
-      if (!signals[activeSignalIdx]) signals[activeSignalIdx] = {name:'', summary:'', images:[]};
+      if (!signals[activeSignalIdx]) signals[activeSignalIdx] = {name:'', summaries:[''], images:[]};
       if (!signals[activeSignalIdx].images) signals[activeSignalIdx].images = [];
       results.forEach(function(src) { if (src) signals[activeSignalIdx].images.push(src); });
       renderSignalThumbs();
@@ -1698,7 +1732,7 @@ document.addEventListener('paste', function(e) {
       const reader = new FileReader();
       reader.onload = function(ev) {
         if (activeSignalIdx == null) return;
-        if (!signals[activeSignalIdx]) signals[activeSignalIdx] = {name:'', summary:'', images:[]};
+        if (!signals[activeSignalIdx]) signals[activeSignalIdx] = {name:'', summaries:[''], images:[]};
         if (!signals[activeSignalIdx].images) signals[activeSignalIdx].images = [];
         signals[activeSignalIdx].images.push(ev.target.result);
         renderSignalThumbs();
@@ -1713,7 +1747,7 @@ document.addEventListener('paste', function(e) {
 
 function openSignalImages(idx) {
   activeSignalIdx = idx;
-  if (!signals[idx]) signals[idx] = {name:'', summary:'', images:[]};
+  if (!signals[idx]) signals[idx] = {name:'', summaries:[''], images:[]};
   document.getElementById('sig_title').textContent = '信号模板 · ' + (signals[idx].name || ('信号 ' + (idx + 1)));
   renderSignalThumbs();
   document.getElementById('sig_overlay').style.display = 'flex';
