@@ -10,7 +10,7 @@ REM ======================================================================
 cd /d "%~dp0"
 
 echo [1/3] Uploading files to remote...
-scp compound_server.py echarts.min.js echarts-gl.min.js restart.ps1 "%REMOTE_USER%@%REMOTE_HOST%:%REMOTE_DIR%/"
+scp compound_server.py echarts.min.js echarts-gl.min.js restart.ps1 .env "%REMOTE_USER%@%REMOTE_HOST%:%REMOTE_DIR%/"
 
 echo [2/3] Installing python deps on remote...
 ssh "%REMOTE_USER%@%REMOTE_HOST%" "python -m pip install pymysql --quiet"

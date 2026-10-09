@@ -17,6 +17,30 @@ import threading
 import pymysql
 import hashlib
 import secrets
+import re
+
+# ---- 火山方舟(豆包)视觉识别配置 ----
+def _load_dotenv(path=None):
+    """读取项目 .env（若存在），把键值注入环境变量（不覆盖已有）。"""
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+        except Exception:
+            pass
+
+_load_dotenv()
+
+ARK_BASE_URL = os.environ.get("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+ARK_API_KEY = os.environ.get("ARK_API_KEY", "")
+ARK_MODEL = os.environ.get("ARK_MODEL", "doubao-seed-2-0-lite-260428")
 
 HOST = "0.0.0.0"
 PORT = 7777
@@ -164,6 +188,17 @@ def init_db():
             cur.execute("""CREATE TABLE IF NOT EXISTS signals (
                 username VARCHAR(64) PRIMARY KEY,
                 data LONGTEXT
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS trades (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(64),
+                contract VARCHAR(64),
+                side VARCHAR(16),
+                price VARCHAR(32),
+                volume VARCHAR(32),
+                trade_time VARCHAR(32),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_trades_user (username)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
     finally:
         conn.close()
@@ -372,6 +407,123 @@ def save_signals(username, data):
             conn.close()
     except Exception:
         pass
+
+
+# ---- 交易记录 ----
+def load_trades(username):
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, contract, side, price, volume, trade_time FROM trades WHERE username=%s ORDER BY id", (username,))
+                rows = cur.fetchall()
+            return [{"id": r[0], "contract": r[1], "side": r[2], "price": r[3],
+                     "volume": r[4], "trade_time": r[5]} for r in rows]
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
+def replace_trades(username, trades):
+    """全量覆盖：先删该用户旧记录，再逐条插入。"""
+    if not isinstance(trades, list):
+        return
+    try:
+        conn = _conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM trades WHERE username=%s", (username,))
+                for t in trades:
+                    if not isinstance(t, dict):
+                        continue
+                    cur.execute(
+                        "INSERT INTO trades (username, contract, side, price, volume, trade_time) VALUES (%s, %s, %s, %s, %s, %s)",
+                        (username,
+                         str(t.get("contract", "") or "")[:64],
+                         str(t.get("side", "") or "")[:16],
+                         str(t.get("price", "") or "")[:32],
+                         str(t.get("volume", "") or "")[:32],
+                         str(t.get("trade_time", "") or "")[:32]))
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def recognize_trades(image_data_url, api_key=None):
+    """调用豆包视觉模型识别交易截图，返回 (list|None, err)。"""
+    key = (api_key or "").strip() or ARK_API_KEY
+    if not key:
+        return None, "未配置豆包 API Key（请在页面「豆包通用 API Key」输入框填写）"
+    if not image_data_url:
+        return None, "缺少图片数据"
+    try:
+        import urllib.request
+        payload = {
+            "model": ARK_MODEL,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": (
+                    "这是一张期货成交记录截图。请识别其中的表格数据，输出 JSON 数组。"
+                    "每行包含字段 contract(合约代码), side(开平方向，保留截图里的完整原始文字，如 买开/卖开/买平/卖平/买平今/卖平今/买平昨 等，不要简化成开/平), price(成交价，保留数字), "
+                    "volume(成交量，数字), trade_time(成交时间，输出完整日期时间，格式 YYYY-MM-DD HH:MM:SS；"
+                    "年份请从截图顶部日期筛选区域或界面其他位置读取并补全；若确实读不到年份，则保留时间列的月-日时分秒如 \"09-29 22:37:20\"；"
+                    "绝对不要只输出时分秒)。"
+                    "只输出 JSON，不要任何解释或代码块标记。"
+                )},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ]}],
+            "max_tokens": 6000,
+        }
+        req = urllib.request.Request(
+            ARK_BASE_URL.rstrip("/") + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except Exception as e:
+        return None, "识别请求失败: %s" % e
+
+    arr = _extract_json_array(content)
+    if arr is None:
+        return None, "识别结果无法解析，请重试或手动录入"
+    result = []
+    for item in arr:
+        if not isinstance(item, dict):
+            continue
+        result.append({
+            "contract": str(item.get("contract", "") or "").strip(),
+            "side": str(item.get("side", "") or "").strip(),
+            "price": str(item.get("price", "") or "").strip(),
+            "volume": str(item.get("volume", "") or "").strip(),
+            "trade_time": str(item.get("trade_time", "") or "").strip(),
+        })
+    if not result:
+        return None, "未从截图中识别出任何交易记录"
+    return result, None
+
+
+def _extract_json_array(s):
+    """从模型输出里提取第一个 JSON 数组。"""
+    if not s:
+        return None
+    s = s.strip()
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", s)
+    if m:
+        s = m.group(1).strip()
+    start = s.find("[")
+    end = s.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        val = json.loads(s[start:end + 1])
+        if isinstance(val, list):
+            return val
+    except Exception:
+        pass
+    return None
 
 
 def compute(principal, rate, periods):
@@ -621,6 +773,21 @@ HTML = r"""<!DOCTYPE html>
   .sig-img-del:hover { filter:none; }
   .sig-img-del:active { transform:none; box-shadow:none; }
   .sig-img-empty { grid-column:1 / -1; color:var(--muted); font-size:12px; padding:14px; text-align:center; border:1px dashed var(--line); border-radius:6px; }
+  .trade-toolbar { display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
+  .trade-btn { border:1px solid var(--line); background:var(--card); border-radius:8px; padding:7px 14px; cursor:pointer; font-size:13px; color:var(--ink); box-shadow:none; }
+  .trade-btn:hover { background:var(--hover-bg); filter:none; }
+  .trade-btn:active { transform:none; box-shadow:none; }
+  .trade-input { width:100%; padding:6px 8px; border:1px solid var(--line); border-radius:6px; font-size:13px; background:var(--card); color:var(--ink); }
+  .trade-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .trade-key-input { padding:7px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px; background:var(--card); color:var(--ink); min-width:220px; }
+  .trade-key-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .trade-sort-th { cursor:pointer; user-select:none; }
+  .trade-sort-th:hover { color:var(--accent); }
+  #trade_sort_arrow { color:var(--accent); font-weight:700; margin-left:2px; }
+  .trade-del { border:none; background:transparent; box-shadow:none; color:var(--muted); font-size:18px; line-height:1; cursor:pointer; padding:0 6px; font-weight:400; }
+  .trade-del:hover { color:var(--red); filter:none; }
+  .trade-del:active { transform:none; box-shadow:none; }
+  #trades_tbody td { vertical-align:middle; }
   .sig-lightbox { position:fixed; inset:0; background:rgba(0,0,0,.85); display:flex; align-items:center; justify-content:center; z-index:250; cursor:zoom-out; }
   .sig-lightbox img { max-width:94vw; max-height:94vh; border-radius:8px; box-shadow:0 20px 60px rgba(0,0,0,.5); transition:transform .15s ease; transform-origin:center center; }
   .sig-lb-toolbar { position:fixed; top:16px; right:16px; display:flex; gap:8px; align-items:center; background:rgba(0,0,0,.6); padding:8px 12px; border-radius:10px; z-index:251; }
@@ -793,6 +960,25 @@ HTML = r"""<!DOCTYPE html>
         </table>
       </div>
       <div class="foot" id="foot"></div>
+    </div>
+    <div class="panel">
+      <h2>交易记录</h2>
+      <div class="trade-toolbar">
+        <button type="button" class="trade-btn" onclick="uploadTradeImages()">🖼 上传截图识别</button>
+        <button type="button" class="trade-btn" onclick="addTradeRow()">+ 手动添加</button>
+        <input type="password" id="ark_key_input" class="trade-key-input" placeholder="豆包通用 API Key" autocomplete="off">
+        <span class="tb-hint" id="trade_ocr_hint"></span>
+        <input type="file" id="trade_file" accept="image/*" multiple style="display:none">
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>序号</th><th>合约</th><th>开平</th><th>成交价</th><th>成交量</th><th class="trade-sort-th" onclick="sortTradesByTime()">成交时间 <span id="trade_sort_arrow">↓</span></th><th>盈亏</th><th></th></tr>
+          </thead>
+          <tbody id="trades_tbody"></tbody>
+        </table>
+      </div>
+      <div class="foot" id="trades_foot"></div>
     </div>
     <div class="panel">
       <h2>交易铁律</h2>
@@ -1340,6 +1526,7 @@ function enterApp() {
   loadPlans();
   loadReflections();
   loadSignals();
+  loadTrades();
 }
 
 function logout() {
@@ -1919,6 +2106,278 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
+/* ==================== 交易记录 ==================== */
+let trades = [];
+let ocrPreviewTrades = [];
+let arkApiKey = '';
+try { arkApiKey = localStorage.getItem('ark_api_key') || ''; } catch (e) {}
+let tradeSortDir = 'desc';
+
+function applyTradeSort() {
+  const dir = tradeSortDir;
+  trades.sort(function(a, b) {
+    const ta = (a.trade_time || '').trim();
+    const tb = (b.trade_time || '').trim();
+    if (!ta && !tb) return 0;
+    if (!ta) return 1;   // 空值始终排最后（与方向无关）
+    if (!tb) return -1;
+    const c = ta < tb ? -1 : (ta > tb ? 1 : 0);
+    return dir === 'asc' ? c : -c;
+  });
+}
+
+function sortTradesByTime() {
+  tradeSortDir = tradeSortDir === 'desc' ? 'asc' : 'desc';
+  applyTradeSort();
+  renderTrades();
+  renderTradeSortArrow();
+}
+
+function renderTradeSortArrow() {
+  const el = document.getElementById('trade_sort_arrow');
+  if (el) el.textContent = tradeSortDir === 'asc' ? '↑' : '↓';
+}
+
+function initArkKeyInput() {
+  const input = document.getElementById('ark_key_input');
+  if (!input) return;
+  input.value = arkApiKey;
+  input.oninput = function() {
+    arkApiKey = this.value.trim();
+    try { localStorage.setItem('ark_api_key', arkApiKey); } catch (e) {}
+  };
+}
+
+function loadTrades() {
+  fetch('/api/trades?token=' + encodeURIComponent(authToken))
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (d && d.error) { handleAuthExpired(); return; }
+      trades = Array.isArray(d) ? d : [];
+      applyTradeSort();
+      renderTrades();
+      renderTradeSortArrow();
+    });
+}
+
+// 合约乘数表：品种名/代码 → 每手每点价值（元）。未知品种默认 1，可随时补充。
+const CONTRACT_MULTIPLIER = {
+  '甲醇':10, '玻璃':20, '苯乙烯':5, '乙二醇':10, '沥青':10,
+  '螺纹钢':10, '热卷':10, '铁矿石':100, '焦炭':100, '焦煤':60,
+  '黄金':1000, '白银':15, '铜':5, '铝':5, '锌':5, '镍':1, '不锈钢':5,
+  '原油':1000, '燃料油':10, '天然橡胶':10, '橡胶':10, '纸浆':10,
+  'PTA':5, '短纤':5, '棉花':5, '白糖':10, '苹果':10, '红枣':5,
+  '豆粕':10, '菜粕':10, '豆油':10, '棕榈油':10, '菜籽油':10,
+  '玉米':10, '淀粉':10, '豆一':10, '豆二':10, '鸡蛋':10, '生猪':16,
+  '尿素':20, '纯碱':20, '硅铁':5, '锰硅':5, '动力煤':100,
+  'rb':10, 'hc':10, 'i':100, 'j':100, 'jm':60, 'au':1000, 'ag':15,
+  'cu':5, 'al':5, 'zn':5, 'ni':1, 'ss':5, 'sc':1000, 'fu':10, 'ru':10,
+  'sp':10, 'ta':5, 'pf':5, 'cf':5, 'sr':10, 'ap':10, 'cj':5,
+  'm':10, 'rm':10, 'y':10, 'p':10, 'oi':10, 'c':10, 'cs':10, 'a':10, 'b':10,
+  'jd':10, 'lh':16, 'ur':20, 'sa':20, 'sf':5, 'sm':5, 'zc':100,
+  'ma':10, 'fg':20, 'eb':5, 'eg':10, 'bu':10, 'pb':5, 'sn':1,
+};
+
+function getMultiplier(contract) {
+  const s = (contract || '').trim();
+  const name = s.replace(/[0-9]/g, '').trim();
+  if (name && CONTRACT_MULTIPLIER[name] != null) return CONTRACT_MULTIPLIER[name];
+  const m = s.match(/^[a-zA-Z]+/);
+  if (m && CONTRACT_MULTIPLIER[m[0].toLowerCase()] != null) return CONTRACT_MULTIPLIER[m[0].toLowerCase()];
+  return 1;
+}
+
+function computePnlMap() {
+  // 按成交时间升序做 FIFO 配对，返回 Map(记录对象 -> 盈亏值 | null)
+  const sorted = trades.slice().sort(function(a, b) {
+    return (a.trade_time || '').localeCompare(b.trade_time || '');
+  });
+  const map = new Map();
+  const queues = {};  // contract -> { long:[{price,volume}], short:[...] }
+  sorted.forEach(function(r) {
+    const side = (r.side || '').trim();
+    const contract = (r.contract || '').trim();
+    const price = parseFloat(r.price);
+    const volume = parseFloat(r.volume) || 0;
+    const isBuy = side.indexOf('买') >= 0;
+    const isOpen = side.indexOf('开') >= 0;
+    const isClose = side.indexOf('平') >= 0;
+    const mult = getMultiplier(contract);
+    if (!contract || isNaN(price) || volume <= 0) { map.set(r, null); return; }
+    if (isOpen) {
+      const q = queues[contract] = queues[contract] || { long: [], short: [] };
+      (isBuy ? q.long : q.short).push({ price: price, volume: volume });
+      map.set(r, null);
+    } else if (isClose) {
+      const q = queues[contract] = queues[contract] || { long: [], short: [] };
+      const target = isBuy ? q.short : q.long;  // 买平→平空；卖平→平多
+      let remaining = volume;
+      let pnl = 0;
+      while (remaining > 0 && target.length) {
+        const o = target[0];
+        const used = Math.min(o.volume, remaining);
+        pnl += (isBuy ? (o.price - price) : (price - o.price)) * mult * used;
+        o.volume -= used;
+        remaining -= used;
+        if (o.volume <= 0) target.shift();
+      }
+      map.set(r, pnl);
+    } else {
+      map.set(r, null);
+    }
+  });
+  return map;
+}
+
+function renderTrades() {
+  const tbody = document.getElementById('trades_tbody');
+  if (!tbody) return;
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px;">暂无交易记录，点击「上传截图识别」或「+ 手动添加」</td></tr>';
+  } else {
+    const pnlMap = computePnlMap();
+    tbody.innerHTML = trades.map(function(t, i) {
+      const pnl = pnlMap.get(t);
+      const hasPnl = pnl !== null && pnl !== undefined;
+      const pnlText = hasPnl ? (pnl >= 0 ? '+' : '') + fmt(pnl) : '';
+      const pnlCls = hasPnl ? (pnl >= 0 ? 'dev-pos' : 'dev-neg') : '';
+      return '<tr>' +
+        '<td class="rule-idx">' + (i + 1) + '</td>' +
+        '<td><input class="trade-input" type="text" placeholder="如 rb2510" value="' + escapeHtml(t.contract || '') + '" oninput="trades[' + i + '].contract = this.value; scheduleSaveTrades()"></td>' +
+        '<td><input class="trade-input" type="text" placeholder="买开/卖平" value="' + escapeHtml(t.side || '') + '" oninput="trades[' + i + '].side = this.value; scheduleSaveTrades()"></td>' +
+        '<td><input class="trade-input" type="text" inputmode="decimal" placeholder="成交价" value="' + escapeHtml(t.price || '') + '" oninput="trades[' + i + '].price = this.value; scheduleSaveTrades()"></td>' +
+        '<td><input class="trade-input" type="text" inputmode="decimal" placeholder="成交量" value="' + escapeHtml(t.volume || '') + '" oninput="trades[' + i + '].volume = this.value; scheduleSaveTrades()"></td>' +
+        '<td><input class="trade-input" type="text" placeholder="HH:MM:SS" value="' + escapeHtml(t.trade_time || '') + '" oninput="trades[' + i + '].trade_time = this.value; scheduleSaveTrades()"></td>' +
+        '<td class="num ' + pnlCls + '" data-role="pnl">' + pnlText + '</td>' +
+        '<td><button type="button" class="trade-del" onclick="removeTrade(' + i + ')" title="删除">×</button></td>' +
+        '</tr>';
+    }).join('');
+  }
+  const foot = document.getElementById('trades_foot');
+  if (foot) foot.textContent = '共 ' + trades.length + ' 条交易记录';
+}
+
+let saveTradesTimer = null;
+function scheduleSaveTrades() {
+  if (saveTradesTimer) clearTimeout(saveTradesTimer);
+  saveTradesTimer = setTimeout(saveTrades, 600);
+}
+
+function saveTrades() {
+  fetch('/api/trades', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({token: authToken, trades: trades})
+  });
+}
+
+function addTradeRow() {
+  trades.push({contract:'', side:'', price:'', volume:'', trade_time:''});
+  renderTrades();
+  saveTrades();
+}
+
+function removeTrade(i) {
+  trades.splice(i, 1);
+  renderTrades();
+  saveTrades();
+}
+
+function uploadTradeImages() {
+  const input = document.getElementById('trade_file');
+  if (input) input.click();
+}
+
+function initTradeUpload() {
+  const input = document.getElementById('trade_file');
+  if (!input) return;
+  input.onchange = function() {
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (!files.length) return;
+    const hint = document.getElementById('trade_ocr_hint');
+    if (hint) hint.textContent = '识别中…';
+    const results = [];
+    const run = function(k) {
+      if (k >= files.length) {
+        if (hint) hint.textContent = '';
+        openTradeOcrPreview(results);
+        return;
+      }
+      const file = files[k];
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        fetch('/api/trade_ocr', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({token: authToken, image: e.target.result, api_key: arkApiKey})
+        }).then(function(r){ return r.json(); }).then(function(d) {
+          if (d && d.error) {
+            if (hint) hint.textContent = '第 ' + (k + 1) + ' 张识别失败: ' + d.error;
+            run(k + 1);
+          } else {
+            (d && d.trades ? d.trades : []).forEach(function(row){ results.push(row); });
+            run(k + 1);
+          }
+        }).catch(function() {
+          if (hint) hint.textContent = '第 ' + (k + 1) + ' 张识别失败';
+          run(k + 1);
+        });
+      };
+      reader.onerror = function() { run(k + 1); };
+      reader.readAsDataURL(file);
+    };
+    run(0);
+  };
+}
+
+function openTradeOcrPreview(rows) {
+  ocrPreviewTrades = rows || [];
+  renderTradeOcrPreview();
+  document.getElementById('trade_ocr_overlay').style.display = 'flex';
+}
+
+function renderTradeOcrPreview() {
+  const tbody = document.getElementById('trade_ocr_tbody');
+  if (!tbody) return;
+  if (!ocrPreviewTrades.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:16px;">未识别到任何记录</td></tr>';
+    return;
+  }
+  tbody.innerHTML = ocrPreviewTrades.map(function(t, i) {
+    return '<tr>' +
+      '<td><input class="trade-input" type="text" value="' + escapeHtml(t.contract || '') + '" oninput="ocrPreviewTrades[' + i + '].contract = this.value"></td>' +
+      '<td><input class="trade-input" type="text" value="' + escapeHtml(t.side || '') + '" oninput="ocrPreviewTrades[' + i + '].side = this.value"></td>' +
+      '<td><input class="trade-input" type="text" value="' + escapeHtml(t.price || '') + '" oninput="ocrPreviewTrades[' + i + '].price = this.value"></td>' +
+      '<td><input class="trade-input" type="text" value="' + escapeHtml(t.volume || '') + '" oninput="ocrPreviewTrades[' + i + '].volume = this.value"></td>' +
+      '<td><input class="trade-input" type="text" value="' + escapeHtml(t.trade_time || '') + '" oninput="ocrPreviewTrades[' + i + '].trade_time = this.value"></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function confirmTradeOcr() {
+  const valid = ocrPreviewTrades.filter(function(t) {
+    return t && (t.contract || t.side || t.price || t.volume || t.trade_time);
+  });
+  valid.forEach(function(t) {
+    trades.push({
+      contract: t.contract || '', side: t.side || '', price: t.price || '',
+      volume: t.volume || '', trade_time: t.trade_time || ''
+    });
+  });
+  closeTradeOcr();
+  renderTrades();
+  saveTrades();
+}
+
+function closeTradeOcr() {
+  document.getElementById('trade_ocr_overlay').style.display = 'none';
+  ocrPreviewTrades = [];
+}
+
+initTradeUpload();
+initArkKeyInput();
+
 </script>
 <div class="modal-overlay" id="refl_overlay" style="display:none">
   <div class="modal">
@@ -1981,6 +2440,31 @@ document.addEventListener('keydown', function(e) {
     <button type="button" class="sig-lb-close" onclick="closeSignalLightbox()">×</button>
   </div>
   <img id="sig_lightbox_img" src="" alt="信号模板大图" onclick="event.stopPropagation()">
+</div>
+<div class="modal-overlay" id="trade_ocr_overlay" style="display:none">
+  <div class="modal">
+    <div class="modal-head">
+      <span>识别结果预览</span>
+      <button class="modal-close" onclick="closeTradeOcr()">×</button>
+    </div>
+    <div class="modal-toolbar">
+      <span class="tb-hint">核对并修正后点「确认入库」，将追加到交易记录</span>
+    </div>
+    <div class="refl-editor" style="min-height:auto;cursor:default;">
+      <div class="table-scroll" style="max-height:420px;border:none;">
+        <table>
+          <thead>
+            <tr><th>合约</th><th>开平</th><th>成交价</th><th>成交量</th><th>成交时间</th></tr>
+          </thead>
+          <tbody id="trade_ocr_tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="save-btn" onclick="confirmTradeOcr()">确认入库</button>
+      <button class="cancel-btn" onclick="closeTradeOcr()">取消</button>
+    </div>
+  </div>
 </div>
 </body>
 </html>
@@ -2051,6 +2535,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(load_signals(user), ensure_ascii=False), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/trades":
+            q = parse_qs(parsed.query)
+            token = q.get("token", [None])[0]
+            user = get_session_user(token) if token else None
+            if not user:
+                self._send(401, json.dumps({"error": "未登录"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps(load_trades(user), ensure_ascii=False), "application/json; charset=utf-8")
+            return
         if parsed.path == "/favicon.ico":
             self._send(204, "", "text/plain")
             return
@@ -2064,7 +2557,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path in ("/api/register", "/api/login", "/api/logout", "/api/reflection", "/api/plan", "/api/plan_delete", "/api/signals"):
+        if parsed.path in ("/api/register", "/api/login", "/api/logout", "/api/reflection", "/api/plan", "/api/plan_delete", "/api/signals", "/api/trades", "/api/trade_ocr"):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length).decode("utf-8")
@@ -2145,6 +2638,25 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 save_signals(user, json.dumps(signals_data, ensure_ascii=False))
                 self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
+                return
+
+            if parsed.path == "/api/trades":
+                trades_data = data.get("trades")
+                if not isinstance(trades_data, list):
+                    self._send(400, json.dumps({"error": "trades required"}), "application/json; charset=utf-8")
+                    return
+                replace_trades(user, trades_data)
+                self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
+                return
+
+            if parsed.path == "/api/trade_ocr":
+                image = data.get("image")
+                api_key = (data.get("api_key") or "").strip()
+                rows, err = recognize_trades(image, api_key)
+                if err:
+                    self._send(400, json.dumps({"error": err}), "application/json; charset=utf-8")
+                    return
+                self._send(200, json.dumps({"ok": True, "trades": rows}, ensure_ascii=False), "application/json; charset=utf-8")
                 return
 
         self._send(404, json.dumps({"error": "not found"}), "application/json; charset=utf-8")
