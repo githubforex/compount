@@ -139,8 +139,14 @@ def init_db():
                 rate VARCHAR(32),
                 periods VARCHAR(32),
                 start_date VARCHAR(32),
+                actuals LONGTEXT,
+                transfers LONGTEXT,
                 PRIMARY KEY (username, name)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+            if not _col_exists(cur, "plans", "actuals"):
+                cur.execute("ALTER TABLE plans ADD COLUMN actuals LONGTEXT")
+            if not _col_exists(cur, "plans", "transfers"):
+                cur.execute("ALTER TABLE plans ADD COLUMN transfers LONGTEXT")
             if _table_exists(cur, "reflections") and not _col_exists(cur, "reflections", "username"):
                 cur.execute("DROP TABLE reflections")
             cur.execute("""CREATE TABLE IF NOT EXISTS reflections (
@@ -253,10 +259,22 @@ def load_plans(username):
         conn = _conn()
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT name, principal, rate, periods, start_date FROM plans WHERE username=%s", (username,))
+                cur.execute("SELECT name, principal, rate, periods, start_date, actuals, transfers FROM plans WHERE username=%s", (username,))
                 rows = cur.fetchall()
-            return {name: {"principal": principal, "rate": rate, "periods": periods, "start_date": start_date}
-                    for name, principal, rate, periods, start_date in rows}
+            result = {}
+            for name, principal, rate, periods, start_date, actuals, transfers in rows:
+                try:
+                    actuals_list = json.loads(actuals) if actuals else []
+                except Exception:
+                    actuals_list = []
+                try:
+                    transfers_list = json.loads(transfers) if transfers else []
+                except Exception:
+                    transfers_list = []
+                result[name] = {"principal": principal, "rate": rate, "periods": periods,
+                                "start_date": start_date, "actuals": actuals_list,
+                                "transfers": transfers_list}
+            return result
         finally:
             conn.close()
     except Exception:
@@ -267,13 +285,18 @@ def save_plan(username, name, params):
     try:
         conn = _conn()
         try:
+            actuals = params.get("actuals")
+            actuals_json = json.dumps(actuals, ensure_ascii=False) if actuals is not None else ""
+            transfers = params.get("transfers")
+            transfers_json = json.dumps(transfers, ensure_ascii=False) if transfers is not None else ""
             with conn.cursor() as cur:
-                cur.execute("""INSERT INTO plans (username, name, principal, rate, periods, start_date)
-                               VALUES (%s, %s, %s, %s, %s, %s)
+                cur.execute("""INSERT INTO plans (username, name, principal, rate, periods, start_date, actuals, transfers)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                                ON DUPLICATE KEY UPDATE principal=VALUES(principal), rate=VALUES(rate),
-                               periods=VALUES(periods), start_date=VALUES(start_date)""",
+                               periods=VALUES(periods), start_date=VALUES(start_date), actuals=VALUES(actuals),
+                               transfers=VALUES(transfers)""",
                             (username, name, params.get("principal", ""), params.get("rate", ""),
-                             params.get("periods", ""), params.get("start_date", "")))
+                             params.get("periods", ""), params.get("start_date", ""), actuals_json, transfers_json))
         finally:
             conn.close()
     except Exception:
@@ -525,6 +548,7 @@ HTML = r"""<!DOCTYPE html>
   .cal-refl:hover { opacity:1; }
   .cal-refl.has { opacity:1; }
   .cal-profit { display:block; font-size:10px; color:var(--red); margin-top:2px; line-height:1.1; white-space:nowrap; }
+  .cal-transfer { display:block; font-size:10px; color:var(--accent); margin-top:1px; line-height:1.1; white-space:nowrap; }
   .cal-summary { display:flex; flex-direction:column; justify-content:center; align-items:center; background:rgba(76,110,245,.10); border:1px dashed var(--accent); border-radius:8px; padding:4px 2px; }
   .cal-summary .cal-sum-total { font-size:10px; font-weight:700; color:var(--ink); line-height:1.1; white-space:nowrap; }
   .cal-summary .cal-sum-pnl { font-size:10px; font-weight:700; line-height:1.1; white-space:nowrap; }
@@ -561,8 +585,8 @@ HTML = r"""<!DOCTYPE html>
   .modal-foot { display:flex; justify-content:flex-end; gap:10px; padding:12px 18px; border-top:1px solid var(--line); }
   .save-btn { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:8px 20px; cursor:pointer; font-size:14px; }
   .cancel-btn { border:1px solid var(--line); background:var(--card); border-radius:8px; padding:8px 18px; cursor:pointer; font-size:14px; color:var(--ink); }
-  .actual-input { width:110px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; font-size:13px; text-align:right; font-variant-numeric:tabular-nums; background:var(--card); color:var(--ink); }
-  .actual-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  .actual-input, .transfer-input { width:110px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; font-size:13px; text-align:right; font-variant-numeric:tabular-nums; background:var(--card); color:var(--ink); }
+  .actual-input:focus, .transfer-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
   .dev-pos { color:var(--red); }
   .dev-neg { color:var(--green); }
   .rule-idx { text-align:center; color:var(--muted); width:44px; }
@@ -763,7 +787,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="table-scroll">
         <table>
           <thead>
-            <tr><th>期数</th><th>日期</th><th>起始资金（元）</th><th>差额（元）</th><th>实际表现（元）</th><th>偏差（元）</th></tr>
+            <tr><th>期数</th><th>日期</th><th>起始资金（元）</th><th>差额（元）</th><th>实际表现（元）</th><th>出入金（元）</th><th>偏差（元）</th></tr>
           </thead>
           <tbody id="tbody"></tbody>
         </table>
@@ -816,6 +840,9 @@ function fmtCompact(v) {
 }
 
 let lastRows = null, lastPrincipal = null, lastTradeDates = null, adjustedDiffs = null, lastCalendarData = null, actualValues = null, diffStatus = null;
+let currentActuals = null;
+let currentTransfers = null;
+let transfers = null;
 
 function themeColors() {
   const dark = document.documentElement.getAttribute('data-theme') === 'dark';
@@ -922,8 +949,15 @@ function refreshTableDates() {
   });
 }
 
+let saveActualsTimer = null;
+function scheduleSaveActuals() {
+  if (saveActualsTimer) clearTimeout(saveActualsTimer);
+  saveActualsTimer = setTimeout(function() { savePlan(); }, 500);
+}
+
 function updateDeviation(input) {
   recalculate();
+  scheduleSaveActuals();
 }
 
 function recalculate() {
@@ -933,6 +967,7 @@ function recalculate() {
   let cur = principal;
   adjustedDiffs = [];
   actualValues = [];
+  transfers = [];
   diffStatus = [];
   inputs.forEach(function(inp) {
     const tr = inp.closest('tr');
@@ -941,7 +976,11 @@ function recalculate() {
     const hasActual = raw !== '' && !isNaN(parseFloat(raw));
     const actualVal = hasActual ? parseFloat(raw) : null;
     const usedDiff = actualVal !== null ? actualVal : theoryDiff;  // 有实际用实际，否则用理论
-    const amount = cur + usedDiff;
+    const tInput = tr.querySelector('.transfer-input');
+    const tRaw = tInput ? tInput.value.trim() : '';
+    const transfer = (tRaw !== '' && !isNaN(parseFloat(tRaw))) ? parseFloat(tRaw) : null;
+    const transferVal = transfer !== null ? transfer : 0;
+    const amount = cur + usedDiff + transferVal;   // 出入金直接计入总额（出金负/入金正）
 
     const diffTd = tr.querySelector('[data-role="diff"]');
     if (diffTd) diffTd.textContent = '+' + fmt(theoryDiff);
@@ -966,9 +1005,12 @@ function recalculate() {
     }
     diffStatus.push(status);
     actualValues.push(actualVal);
+    transfers.push(transfer);
     adjustedDiffs.push(usedDiff);
     cur = amount;
   });
+  currentActuals = actualValues;
+  currentTransfers = transfers;
   if (lastCalendarData) renderCalendar(lastCalendarData);
   if (lastRows) renderChart(lastRows);
 }
@@ -1016,16 +1058,18 @@ function renderCalendar(d) {
   let col = 0;
   let prevYM = null;
   let monthStart = principal;   // 本月期初总额（= 上月最后一个交易日总额）
-  let cum = principal;          // 当前累计总额
+  let cum = principal;          // 当前累计总额（含出入金）
+  let monthPnl = 0;             // 本月盈亏累计（不含出入金）
   for (const day of d.days) {
     const ym = day.date.slice(0, 7);
     if (ym !== prevYM) {
       if (prevYM !== null) {
-        html += monthSummaryHtml(prevYM, cum - monthStart, monthStart, cum);
+        html += monthSummaryHtml(prevYM, monthPnl, monthStart, cum);
         col++;
         while (col % 7 !== 0) { html += '<div class="cal-cell cal-empty"></div>'; col++; }
       }
       monthStart = cum;
+      monthPnl = 0;
       const parts = day.date.split('-');
       html += '<div class="cal-month">' + parts[0] + '年' + parseInt(parts[1], 10) + '月</div>';
       // 服务端 weekday 定义 0=周一 ... 6=周日，直接作为周一起始网格的列偏移
@@ -1041,8 +1085,13 @@ function renderCalendar(d) {
     if (day.type === 'trading') {
       tradeIndex++;
       const usedDiff = adjustedDiffs && adjustedDiffs[tradeIndex - 1] != null ? adjustedDiffs[tradeIndex - 1] : (principal * Math.pow(1 + rate, tradeIndex - 1) * rate);
-      cum += usedDiff;
+      const transfer = (transfers && transfers[tradeIndex - 1] != null) ? transfers[tradeIndex - 1] : 0;
+      cum += usedDiff + transfer;
+      monthPnl += usedDiff;
       sub = '<span class="cal-profit">' + (usedDiff >= 0 ? '+' : '') + fmtCompact(usedDiff) + '</span>';
+      if (transfer !== 0) {
+        sub += '<span class="cal-transfer">' + (transfer > 0 ? '入' : '出') + fmtCompact(Math.abs(transfer)) + '</span>';
+      }
       if (diffStatus && diffStatus[tradeIndex - 1] === 'below') cls += ' cal-below';
       else if (diffStatus && diffStatus[tradeIndex - 1] === 'above') cls += ' cal-above';
     }
@@ -1051,7 +1100,7 @@ function renderCalendar(d) {
     html += '<div class="' + cls + '" title="' + day.date + '"><span class="cal-day">' + day.day + '</span>' + badge + refl + sub + '</div>';
     col++;
   }
-  html += monthSummaryHtml(prevYM, cum - monthStart, monthStart, cum);
+  html += monthSummaryHtml(prevYM, monthPnl, monthStart, cum);
   html += '</div>';
   html += '<div class="cal-legend"><span class="lg lg-t">交易日</span><span class="lg lg-w">周末</span><span class="lg lg-h">法定节假日</span><span class="lg lg-sum">月汇总</span></div>';
   el.innerHTML = html;
@@ -1103,18 +1152,22 @@ function render(d) {
   adjustedDiffs = null;
   lastCalendarData = null;
   actualValues = null;
+  transfers = null;
   diffStatus = null;
   document.getElementById('tbody').innerHTML = d.rows.map(r =>
     '<tr><td>' + r.n + '</td>' +
     '<td class="num dim">' + (lastTradeDates && lastTradeDates[r.n - 1] ? lastTradeDates[r.n - 1] : '') + '</td>' +
     '<td class="num" data-role="start">' + fmt(r.start) + '</td>' +
     '<td class="num diff" data-role="diff">+' + fmt(r.diff) + '</td>' +
-    '<td><input class="actual-input" type="text" inputmode="decimal" oninput="updateDeviation(this)"></td>' +
+    '<td><input class="actual-input" type="text" inputmode="decimal" value="' + (currentActuals && currentActuals[r.n - 1] != null ? currentActuals[r.n - 1] : '') + '" oninput="updateDeviation(this)"></td>' +
+    '<td><input class="transfer-input" type="text" inputmode="decimal" placeholder="入+/出-" value="' + (currentTransfers && currentTransfers[r.n - 1] != null ? currentTransfers[r.n - 1] : '') + '" oninput="updateDeviation(this)"></td>' +
     '<td class="num dev" data-role="dev"></td></tr>'
   ).join('');
 
   document.getElementById('foot').textContent =
     '共 ' + d.periods + ' 期 · 期末总额 ' + fmt(d.final) + ' 元 · 累计收益 ' + fmt(gain) + ' 元';
+
+  recalculate();
 }
 
 function stat(icon, label, value, sub, hl) {
@@ -1196,10 +1249,12 @@ function renderChart(rows) {
         const p = params[0];
         const row = rows[p.dataIndex];
         const actual = actualValues && actualValues[p.dataIndex] != null ? actualValues[p.dataIndex] : 0;
+        const transfer = (transfers && transfers[p.dataIndex] != null) ? transfers[p.dataIndex] : 0;
         let html = '第 ' + p.axisValue + ' 期';
         html += '<br/>总额：' + fmt(p.value) + ' 元';
         if (row) html += '<br/>差额：' + fmt(row.diff) + ' 元';
         html += '<br/>实际表现：<span style="color:' + t.red + '">' + fmt(actual) + '</span> 元';
+        if (transfer !== 0) html += '<br/>出入金：<span style="color:' + (transfer > 0 ? t.green : t.red) + '">' + (transfer > 0 ? '+' : '') + fmt(transfer) + '</span> 元';
         return html;
       }
     },
@@ -1495,12 +1550,16 @@ function switchPlan(name) {
   document.getElementById('rate').value = p.rate || 3;
   document.getElementById('periods').value = p.periods || 220;
   document.getElementById('start_date').value = p.start_date || '';
+  currentActuals = (p.actuals && p.actuals.length) ? p.actuals : null;
+  currentTransfers = (p.transfers && p.transfers.length) ? p.transfers : null;
   renderPlansTabs();
   compute();
 }
 
 function newPlan() {
   currentPlan = null;
+  currentActuals = null;
+  currentTransfers = null;
   document.getElementById('plan_name').value = '';
   document.getElementById('plan_name').focus();
   renderPlansTabs();
@@ -1515,7 +1574,9 @@ function savePlan() {
     principal: document.getElementById('principal').value,
     rate: document.getElementById('rate').value,
     periods: document.getElementById('periods').value,
-    start_date: document.getElementById('start_date').value
+    start_date: document.getElementById('start_date').value,
+    actuals: currentActuals || [],
+    transfers: currentTransfers || []
   };
   plans[name] = params;
   currentPlan = name;
